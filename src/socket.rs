@@ -53,6 +53,8 @@ pub trait IcmpSocket {
 
     /// Receive a packet on this socket.
     fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)>;
+
+    fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()>;
 }
 
 /// Options for this socket.
@@ -135,6 +137,10 @@ impl IcmpSocket for IcmpSocket4 {
 
     fn set_timeout(&mut self, timeout: Option<Duration>) {
         self.opts.timeout = timeout;
+    }
+
+    fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()> {
+        self.inner.bind_device(Some(interface_name.as_bytes()))
     }
 }
 
@@ -226,6 +232,10 @@ impl IcmpSocket for IcmpSocket6 {
 
     fn set_timeout(&mut self, timeout: Option<Duration>) {
         self.opts.timeout = timeout;
+    }
+
+    fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()> {
+        self.inner.bind_device(Some(interface_name.as_bytes()))
     }
 }
 
