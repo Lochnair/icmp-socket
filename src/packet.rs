@@ -106,6 +106,32 @@ pub trait WithEchoReply {
     ) -> Result<Self::Packet, IcmpPacketBuildError>;
 }
 
+/// Construct a packet for the TimestampRequest messages.
+pub trait WithTimestampRequest {
+    type Packet;
+
+    fn with_timestamp_request(
+        identifier: u16,
+        sequence: u16,
+        originate: u32,
+        receive: u32,
+        transmit: u32,
+    ) -> Result<Self::Packet, IcmpPacketBuildError>;
+}
+
+/// Construct a packet for the TimestampReply messages.
+pub trait WithTimestampReply {
+    type Packet;
+
+    fn with_timestamp_reply(
+        identifier: u16,
+        sequence: u16,
+        originate: u32,
+        receive: u32,
+        transmit: u32,
+    ) -> Result<Self::Packet, IcmpPacketBuildError>;
+}
+
 /// Construct a packet for Destination Unreachable messages.
 pub trait WithUnreachable {
     type Packet;
@@ -848,6 +874,56 @@ impl WithEchoRequest for Icmpv4Packet {
                 identifier,
                 sequence,
                 payload,
+            },
+        })
+    }
+}
+
+impl WithTimestampRequest for Icmpv4Packet {
+    type Packet = Icmpv4Packet;
+
+    fn with_timestamp_request(
+        identifier: u16,
+        sequence: u16,
+        originate: u32,
+        receive: u32,
+        transmit: u32,
+    ) -> Result<Self::Packet, IcmpPacketBuildError> {
+        Ok(Self {
+            typ: 13,
+            code: 0,
+            checksum: 0,
+            message: Icmpv4Message::Timestamp {
+                identifier,
+                sequence,
+                originate,
+                receive,
+                transmit,
+            },
+        })
+    }
+}
+
+impl WithTimestampReply for Icmpv4Packet {
+    type Packet = Icmpv4Packet;
+
+    fn with_timestamp_reply(
+        identifier: u16,
+        sequence: u16,
+        originate: u32,
+        receive: u32,
+        transmit: u32,
+    ) -> Result<Self::Packet, IcmpPacketBuildError> {
+        Ok(Self {
+            typ: 14,
+            code: 0,
+            checksum: 0,
+            message: Icmpv4Message::TimestampReply {
+                identifier,
+                sequence,
+                originate,
+                receive,
+                transmit,
             },
         })
     }
