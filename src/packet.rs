@@ -45,7 +45,6 @@
 //! ```
 use std::convert::TryFrom;
 
-use byteorder::{BigEndian, ByteOrder};
 use std::net::Ipv6Addr;
 
 fn ipv6_sum_words(ip: &Ipv6Addr) -> u32 {
@@ -62,7 +61,7 @@ fn sum_big_endian_words(bs: &[u8]) -> u32 {
     let mut sum = 0u32;
     // Iterate by word which is two bytes.
     while data.len() >= 2 {
-        sum += BigEndian::read_u16(&data[0..2]) as u32;
+        sum += u16_from_be(&data[0..2]) as u32;
         // remove the first two bytes now that we've already summed them
         data = &data[2..];
     }
@@ -72,6 +71,16 @@ fn sum_big_endian_words(bs: &[u8]) -> u32 {
         sum += (data[0] as u32) << 8;
     }
     return sum;
+}
+
+#[inline]
+fn u16_from_be(data: &[u8]) -> u16 {
+    u16::from_be_bytes(data.try_into().expect("Invalid slice size for u16"))
+}
+
+#[inline]
+fn u32_from_be(data: &[u8]) -> u32 {
+    u32::from_be_bytes(data.try_into().expect("Invalid slice size for u32"))
 }
 
 /// Construct a packet for the EchoRequest messages.
@@ -190,9 +199,7 @@ impl Icmpv6Message {
                 padding: field1,
                 payload: field2,
             } => {
-                let mut buf = vec![0; 4];
-                BigEndian::write_u32(&mut buf, *field1);
-                bytes.append(&mut buf);
+                bytes.extend_from_slice(&field1.to_be_bytes());
                 bytes.extend_from_slice(field2);
             }
             EchoRequest {
@@ -205,12 +212,8 @@ impl Icmpv6Message {
                 sequence,
                 payload,
             } => {
-                let mut buf = vec![0; 2];
-                BigEndian::write_u16(&mut buf, *identifier);
-                bytes.append(&mut buf);
-                buf.resize(2, 0);
-                BigEndian::write_u16(&mut buf, *sequence);
-                bytes.append(&mut buf);
+                bytes.extend_from_slice(&identifier.to_be_bytes());
+                bytes.extend_from_slice(&sequence.to_be_bytes());
                 bytes.extend_from_slice(payload);
             }
         }
@@ -245,8 +248,9 @@ impl Icmpv6Packet {
         if bytes.len() < 8 {
             return Err(PacketParseError::PacketTooSmall(bytes.len()));
         }
-        let (typ, code, checksum) = (bytes[0], bytes[1], BigEndian::read_u16(&bytes[2..4]));
-        let next_field = BigEndian::read_u32(&bytes[4..8]);
+        let (typ, code, checksum) = (bytes[0], bytes[1], u16_from_be(&bytes[2..4]));
+        
+        let next_field = u32_from_be(&bytes[4..8]);
         let payload = bytes[8..].to_owned();
         let message = match typ {
             1 => Unreachable {
@@ -270,13 +274,13 @@ impl Icmpv6Packet {
                 payload: payload,
             },
             128 => EchoRequest {
-                identifier: BigEndian::read_u16(&bytes[4..6]),
-                sequence: BigEndian::read_u16(&bytes[6..8]),
+                identifier: u16_from_be(&bytes[4..6]),
+                sequence: u16_from_be(&bytes[6..8]),
                 payload: payload,
             },
             129 => EchoReply {
-                identifier: BigEndian::read_u16(&bytes[4..6]),
-                sequence: BigEndian::read_u16(&bytes[6..8]),
+                identifier: u16_from_be(&bytes[4..6]),
+                sequence: u16_from_be(&bytes[6..8]),
                 payload: payload,
             },
             t => return Err(PacketParseError::UnrecognizedICMPType(t)),
@@ -294,10 +298,7 @@ impl Icmpv6Packet {
         let mut bytes = Vec::new();
         bytes.push(self.typ);
         bytes.push(self.code);
-        let mut buf = Vec::with_capacity(2);
-        buf.resize(2, 0);
-        BigEndian::write_u16(&mut buf, if with_checksum { self.checksum } else { 0 });
-        bytes.append(&mut buf);
+        bytes.extend_from_slice(&(if with_checksum { self.checksum } else { 0 }).to_be_bytes());
         bytes.append(&mut self.message.get_bytes());
         return bytes;
     }
@@ -604,9 +605,7 @@ impl Icmpv4Message {
                 gateway: padding,
                 header,
             } => {
-                let mut buf = vec![0; 4];
-                BigEndian::write_u32(&mut buf, *padding);
-                bytes.append(&mut buf);
+                bytes.extend_from_slice(&padding.to_be_bytes());
                 bytes.extend_from_slice(header);
             }
             Self::Echo {
@@ -621,12 +620,8 @@ impl Icmpv4Message {
                 sequence,
                 payload,
             } => {
-                let mut buf = vec![0; 2];
-                BigEndian::write_u16(&mut buf, *identifier);
-                bytes.append(&mut buf);
-                buf.resize(2, 0);
-                BigEndian::write_u16(&mut buf, *sequence);
-                bytes.append(&mut buf);
+                bytes.extend_from_slice(&identifier.to_be_bytes());
+                bytes.extend_from_slice(&sequence.to_be_bytes());
                 bytes.extend_from_slice(payload);
             }
             Self::ParameterProblem {
@@ -637,9 +632,7 @@ impl Icmpv4Message {
             } => {
                 bytes.push(*pointer);
                 bytes.push(padding.0);
-                let mut buf = vec![0, 2];
-                BigEndian::write_u16(&mut buf, padding.1);
-                bytes.append(&mut buf);
+                bytes.extend_from_slice(&padding.1.to_be_bytes());
                 bytes.extend_from_slice(header);
             }
             Self::Timestamp {
@@ -658,18 +651,11 @@ impl Icmpv4Message {
                 receive,
                 transmit,
             } => {
-                let mut buf = vec![0, 2];
-                BigEndian::write_u16(&mut buf, *identifier);
-                bytes.append(&mut buf);
-                BigEndian::write_u16(&mut buf, *sequence);
-                bytes.append(&mut buf);
-                buf = vec![0, 4];
-                BigEndian::write_u32(&mut buf, *originate);
-                bytes.append(&mut buf);
-                BigEndian::write_u32(&mut buf, *receive);
-                bytes.append(&mut buf);
-                BigEndian::write_u32(&mut buf, *transmit);
-                bytes.append(&mut buf);
+                bytes.extend_from_slice(&identifier.to_be_bytes());
+                bytes.extend_from_slice(&sequence.to_be_bytes());
+                bytes.extend_from_slice(&originate.to_be_bytes());
+                bytes.extend_from_slice(&receive.to_be_bytes());
+                bytes.extend_from_slice(&transmit.to_be_bytes());
             }
             Self::Information {
                 // type 15
@@ -681,11 +667,8 @@ impl Icmpv4Message {
                 identifier,
                 sequence,
             } => {
-                let mut buf = vec![0, 2];
-                BigEndian::write_u16(&mut buf, *identifier);
-                bytes.append(&mut buf);
-                BigEndian::write_u16(&mut buf, *sequence);
-                bytes.append(&mut buf);
+                bytes.extend_from_slice(&identifier.to_be_bytes());
+                bytes.extend_from_slice(&sequence.to_be_bytes());
             }
         }
         bytes
@@ -713,52 +696,52 @@ impl Icmpv4Packet {
         bytes = &bytes[20..];
         // NOTE(jwall): All ICMP packets are at least 8 bytes long.
         packet_len = bytes.len();
-        let (typ, code, checksum) = (bytes[0], bytes[1], BigEndian::read_u16(&bytes[2..4]));
+        let (typ, code, checksum) = (bytes[0], bytes[1], u16_from_be(&bytes[2..4]));
         let message = match typ {
             3 => Icmpv4Message::Unreachable {
-                padding: BigEndian::read_u32(&bytes[4..8]),
+                padding: u32_from_be(&bytes[4..8]),
                 header: bytes[8..].to_owned(),
             },
             11 => Icmpv4Message::TimeExceeded {
-                padding: BigEndian::read_u32(&bytes[4..8]),
+                padding: u32_from_be(&bytes[4..8]),
                 header: bytes[8..].to_owned(),
             },
             4 => Icmpv4Message::Quench {
-                padding: BigEndian::read_u32(&bytes[4..8]),
+                padding: u32_from_be(&bytes[4..8]),
                 header: bytes[8..].to_owned(),
             },
             5 => Icmpv4Message::Redirect {
-                gateway: BigEndian::read_u32(&bytes[4..8]),
+                gateway: u32_from_be(&bytes[4..8]),
                 header: bytes[8..].to_owned(),
             },
             8 => Icmpv4Message::Echo {
-                identifier: BigEndian::read_u16(&bytes[4..6]),
-                sequence: BigEndian::read_u16(&bytes[6..8]),
+                identifier: u16_from_be(&bytes[4..6]),
+                sequence: u16_from_be(&bytes[6..8]),
                 payload: bytes[8..].to_owned(),
             },
             0 => Icmpv4Message::EchoReply {
-                identifier: BigEndian::read_u16(&bytes[4..6]),
-                sequence: BigEndian::read_u16(&bytes[6..8]),
+                identifier: u16_from_be(&bytes[4..6]),
+                sequence: u16_from_be(&bytes[6..8]),
                 payload: bytes[8..].to_owned(),
             },
             15 => Icmpv4Message::Information {
-                identifier: BigEndian::read_u16(&bytes[4..6]),
-                sequence: BigEndian::read_u16(&bytes[6..8]),
+                identifier: u16_from_be(&bytes[4..6]),
+                sequence: u16_from_be(&bytes[6..8]),
             },
             16 => Icmpv4Message::InformationReply {
-                identifier: BigEndian::read_u16(&bytes[4..6]),
-                sequence: BigEndian::read_u16(&bytes[6..8]),
+                identifier: u16_from_be(&bytes[4..6]),
+                sequence: u16_from_be(&bytes[6..8]),
             },
             13 => {
                 if packet_len < 20 {
                     return Err(PacketParseError::PacketTooSmall(bytes.len()));
                 }
                 Icmpv4Message::Timestamp {
-                    identifier: BigEndian::read_u16(&bytes[4..6]),
-                    sequence: BigEndian::read_u16(&bytes[6..8]),
-                    originate: BigEndian::read_u32(&bytes[8..12]),
-                    receive: BigEndian::read_u32(&bytes[12..16]),
-                    transmit: BigEndian::read_u32(&bytes[16..20]),
+                    identifier: u16_from_be(&bytes[4..6]),
+                    sequence: u16_from_be(&bytes[6..8]),
+                    originate: u32_from_be(&bytes[8..12]),
+                    receive: u32_from_be(&bytes[12..16]),
+                    transmit: u32_from_be(&bytes[16..20]),
                 }
             }
             14 => {
@@ -766,11 +749,11 @@ impl Icmpv4Packet {
                     return Err(PacketParseError::PacketTooSmall(bytes.len()));
                 }
                 Icmpv4Message::TimestampReply {
-                    identifier: BigEndian::read_u16(&bytes[4..6]),
-                    sequence: BigEndian::read_u16(&bytes[6..8]),
-                    originate: BigEndian::read_u32(&bytes[8..12]),
-                    receive: BigEndian::read_u32(&bytes[12..16]),
-                    transmit: BigEndian::read_u32(&bytes[16..20]),
+                    identifier: u16_from_be(&bytes[4..6]),
+                    sequence: u16_from_be(&bytes[6..8]),
+                    originate: u32_from_be(&bytes[8..12]),
+                    receive: u32_from_be(&bytes[12..16]),
+                    transmit: u32_from_be(&bytes[16..20]),
                 }
             }
             t => {
@@ -791,9 +774,7 @@ impl Icmpv4Packet {
         let mut bytes = Vec::new();
         bytes.push(self.typ);
         bytes.push(self.code);
-        let mut buf = vec![0; 2];
-        BigEndian::write_u16(&mut buf, if with_checksum { self.checksum } else { 0 });
-        bytes.append(&mut buf);
+        bytes.extend_from_slice(&(if with_checksum { self.checksum } else { 0 }).to_be_bytes());
         bytes.append(&mut self.message.get_bytes());
         return bytes;
     }
