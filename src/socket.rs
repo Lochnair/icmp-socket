@@ -18,7 +18,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::{
     convert::{Into, TryFrom, TryInto},
-    mem::MaybeUninit,
     time::Duration,
 };
 
@@ -127,11 +126,7 @@ impl IcmpSocket for IcmpSocket4 {
 
     fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
         self.inner.set_read_timeout(self.opts.timeout)?;
-        // NOTE(jwall): the `recv_from` implementation promises not to write uninitialised
-        // bytes to the `buf`fer, so this casting is safe.
-        // TODO(jwall): change to `Vec::spare_capacity_mut` when it stabilizes.
-        let mut buf =
-            unsafe { &mut *(self.buf.as_mut_slice() as *mut [u8] as *mut [MaybeUninit<u8>]) };
+        let mut buf = Vec::spare_capacity_mut(&mut self.buf);
         let (read_count, addr) = self.inner.recv_from(&mut buf)?;
         Ok((self.buf[0..read_count].try_into()?, addr))
     }
@@ -210,7 +205,7 @@ impl IcmpSocket for IcmpSocket6 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "Socket not bound to an address",
-                ))
+                ));
             }
         };
         packet = packet.with_checksum(source, &dest);
@@ -223,11 +218,7 @@ impl IcmpSocket for IcmpSocket6 {
 
     fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
         self.inner.set_read_timeout(self.opts.timeout)?;
-        // NOTE(jwall): the `recv_from` implementation promises not to write uninitialised
-        // bytes to the `buf`fer, so this casting is safe.
-        // TODO(jwall): change to `Vec::spare_capacity_mut` when it stabilizes.
-        let mut buf =
-            unsafe { &mut *(self.buf.as_mut_slice() as *mut [u8] as *mut [MaybeUninit<u8>]) };
+        let mut buf = Vec::spare_capacity_mut(&mut self.buf);
         let (read_count, addr) = self.inner.recv_from(&mut buf)?;
         Ok((self.buf[0..read_count].try_into()?, addr))
     }
