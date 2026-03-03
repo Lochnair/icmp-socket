@@ -1,5 +1,15 @@
 # ICMP Sockets for both IPv4 and IPv6
 
+**This is a fork of [zaphar/icmp-socket](https://github.com/zaphar/icmp-socket).**
+
+### Major Changes Since Fork
+
+- Added timestamp request/reply support
+- Added `with_echo_reply` for IPv4 packets (@djackreuter)
+- Added support for binding to a network interface (@timoschwarzer)
+- Removed `byteorder` dependency
+- Use `Vec::spare_capacity_mut` instead of unsafe buffer initialization
+
 An implementation of ICMP Sockets for both IPv4 and IPv6.
 
 Sockets can be created from IP addresses. IPv4 addresses will construct ICMP4 sockets. IPv6 will construct ICMP6 sockets.
