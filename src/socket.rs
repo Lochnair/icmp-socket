@@ -54,6 +54,7 @@ pub trait IcmpSocket {
     /// Receive a packet on this socket.
     fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)>;
 
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()>;
 }
 
@@ -139,6 +140,7 @@ impl IcmpSocket for IcmpSocket4 {
         self.opts.timeout = timeout;
     }
 
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()> {
         self.inner.bind_device(Some(interface_name.as_bytes()))
     }
@@ -234,6 +236,7 @@ impl IcmpSocket for IcmpSocket6 {
         self.opts.timeout = timeout;
     }
 
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()> {
         self.inner.bind_device(Some(interface_name.as_bytes()))
     }
