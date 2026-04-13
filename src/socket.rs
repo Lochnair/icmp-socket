@@ -84,7 +84,7 @@ impl IcmpSocket4 {
         Ok(Self {
             bound_to: None,
             inner: socket,
-            buf: vec![0; 512],
+            buf: Vec::with_capacity(512),
             opts: Opts {
                 hops: 50,
                 timeout: None,
@@ -126,9 +126,12 @@ impl IcmpSocket for IcmpSocket4 {
 
     fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
         self.inner.set_read_timeout(self.opts.timeout)?;
-        let mut buf = Vec::spare_capacity_mut(&mut self.buf);
-        let (read_count, addr) = self.inner.recv_from(&mut buf)?;
-        Ok((self.buf[0..read_count].try_into()?, addr))
+        self.buf.clear();
+        let (read_count, addr) = self.inner.recv_from(self.buf.spare_capacity_mut())?;
+        unsafe {
+            self.buf.set_len(read_count);
+        }
+        Ok((self.buf[..].try_into()?, addr))
     }
 
     fn set_timeout(&mut self, timeout: Option<Duration>) {
@@ -162,7 +165,7 @@ impl IcmpSocket6 {
         Ok(Self {
             bound_to: None,
             inner: socket,
-            buf: vec![0; 512],
+            buf: Vec::with_capacity(512),
             opts: Opts {
                 hops: 50,
                 timeout: None,
@@ -218,9 +221,12 @@ impl IcmpSocket for IcmpSocket6 {
 
     fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
         self.inner.set_read_timeout(self.opts.timeout)?;
-        let mut buf = Vec::spare_capacity_mut(&mut self.buf);
-        let (read_count, addr) = self.inner.recv_from(&mut buf)?;
-        Ok((self.buf[0..read_count].try_into()?, addr))
+        self.buf.clear();
+        let (read_count, addr) = self.inner.recv_from(self.buf.spare_capacity_mut())?;
+        unsafe {
+            self.buf.set_len(read_count);
+        }
+        Ok((self.buf[..].try_into()?, addr))
     }
 
     fn set_timeout(&mut self, timeout: Option<Duration>) {
