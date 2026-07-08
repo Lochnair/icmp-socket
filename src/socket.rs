@@ -26,7 +26,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::packet::{Icmpv4Packet, Icmpv6Packet};
 
-fn ip_to_socket(ip: &IpAddr) -> SocketAddr {
+pub fn ip_to_socket(ip: &IpAddr) -> SocketAddr {
     SocketAddr::new(*ip, 0)
 }
 
@@ -56,9 +56,9 @@ pub trait IcmpSocket {
 }
 
 /// Options for this socket.
-struct Opts {
-    hops: u32,
-    timeout: Option<Duration>,
+pub struct Opts {
+    pub hops: u32,
+    pub timeout: Option<Duration>,
 }
 
 /// An ICMPv4 socket.
@@ -95,6 +95,11 @@ impl IcmpSocket4 {
     pub fn new_dgram_socket() -> std::io::Result<Self> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4))?;
         Self::new_from_socket(socket)
+    }
+
+    #[cfg(feature = "smol")]
+    pub fn into_async(self) -> std::io::Result<crate::smol::AsyncIcmpV4Socket> {
+        crate::smol::AsyncIcmpV4Socket::new(self.inner, self.bound_to, self.buf, self.opts)
     }
 }
 
