@@ -23,15 +23,13 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use icmp_socket::packet::WithEchoRequest;
-use icmp_socket::socket::IcmpSocket;
 use icmp_socket::*;
 
 #[test]
 #[ignore]
 fn dgram_loopback_roundtrip() {
     let localhost = Ipv4Addr::new(127, 0, 0, 1);
-    let mut socket = match IcmpSocket4::new_dgram_socket() {
+    let mut socket = match DgramIcmpSocket4::new() {
         Ok(s) => s,
         Err(e) => panic!(
             "could not open an ICMP datagram socket ({}); on Linux set \
@@ -44,8 +42,7 @@ fn dgram_loopback_roundtrip() {
         .expect("failed to bind");
     socket.set_timeout(Some(Duration::from_secs(2)));
 
-    let request = Icmpv4Packet::with_echo_request(42, 1, vec![0x20; 16]).unwrap();
-    socket.send_to(localhost, request).expect("failed to send");
+    socket.send(localhost, 1, vec![0x20; 16]).expect("failed to send");
 
     // Read until we see the reply for our destination or time out. The kernel
     // may rewrite the identifier on datagram sockets, so match on the reply

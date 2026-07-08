@@ -22,8 +22,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use icmp_socket::packet::WithEchoRequest;
-use icmp_socket::smol::AsyncIcmpSocket;
 use icmp_socket::*;
 
 fn main() -> std::io::Result<()> {
@@ -37,27 +35,29 @@ fn main() -> std::io::Result<()> {
     // NOTE: `use icmp_socket::*` brings the crate's own `smol` module into
     // scope, so reach the external smol crate explicitly with a leading `::`.
     ::smol::block_on(async move {
-        // Use `IcmpSocket4::new()` for a raw socket (requires privileges).
-        let mut socket = IcmpSocket4::new_dgram_socket()?.into_async()?;
+        // A datagram socket owns its identifier, so we only supply the
+        // sequence and payload to `send`. Use `IcmpSocket4::new()` for a raw
+        // socket (requires privileges), whose send takes a full packet.
+        let mut socket = DgramIcmpSocket4::new()?.into_async()?;
         socket.bind(Ipv4Addr::new(0, 0, 0, 0)).await?;
         socket.set_timeout(Some(Duration::from_secs(1)));
 
         let mut sequence = 0u16;
         loop {
-            let packet = Icmpv4Packet::with_echo_request(
-                42,
-                sequence,
-                vec![
-                    0x20, 0x20, 0x75, 0x73, 0x74, 0x20, 0x61, 0x20, 0x66, 0x6c, 0x65, 0x73, 0x68,
-                    0x20, 0x77, 0x6f, 0x75, 0x6e, 0x64, 0x20, 0x20, 0x74, 0x69, 0x73, 0x20, 0x62,
-                    0x75, 0x74, 0x20, 0x61, 0x20, 0x73, 0x63, 0x72, 0x61, 0x74, 0x63, 0x68, 0x20,
-                    0x20, 0x6b, 0x6e, 0x69, 0x67, 0x68, 0x74, 0x73, 0x20, 0x6f, 0x66, 0x20, 0x6e,
-                    0x69, 0x20, 0x20, 0x20,
-                ],
-            )
-            .unwrap();
             let send_time = Instant::now();
-            socket.send_to(parsed_addr, packet).await?;
+            socket
+                .send(
+                    parsed_addr,
+                    sequence,
+                    vec![
+                        0x20, 0x20, 0x75, 0x73, 0x74, 0x20, 0x61, 0x20, 0x66, 0x6c, 0x65, 0x73,
+                        0x68, 0x20, 0x77, 0x6f, 0x75, 0x6e, 0x64, 0x20, 0x20, 0x74, 0x69, 0x73,
+                        0x20, 0x62, 0x75, 0x74, 0x20, 0x61, 0x20, 0x73, 0x63, 0x72, 0x61, 0x74,
+                        0x63, 0x68, 0x20, 0x20, 0x6b, 0x6e, 0x69, 0x67, 0x68, 0x74, 0x73, 0x20,
+                        0x6f, 0x66, 0x20, 0x6e, 0x69, 0x20, 0x20, 0x20,
+                    ],
+                )
+                .await?;
 
             // Read replies until we see our own destination or time out.
             loop {
