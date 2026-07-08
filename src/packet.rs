@@ -731,6 +731,35 @@ impl Icmpv4Packet {
         Self::parse_icmp(bytes.as_ref())
     }
 
+    /// Parse an Icmpv4Packet, auto-detecting whether the bytes are prefixed
+    /// with an IPv4 header.
+    ///
+    /// Whether the kernel includes the IPv4 header on receive is not a reliable
+    /// function of the socket type: raw sockets always include it, Linux
+    /// datagram (ping) sockets never do, and macOS datagram sockets do. Rather
+    /// than assume, we inspect the first byte: a valid IPv4 header begins with
+    /// version 4 and an IHL of at least 5 words (`0x45..=0x4F`). No IANA
+    /// assigned ICMP type falls in that range, so a real ICMP message is never
+    /// mistaken for an IPv4 header.
+    pub fn parse_auto<B: AsRef<[u8]>>(bytes: B) -> Result<Self, PacketParseError> {
+        let bytes = bytes.as_ref();
+        if Self::has_ipv4_header(bytes) {
+            Self::parse(bytes)
+        } else {
+            Self::parse_dgram(bytes)
+        }
+    }
+
+    /// Whether these bytes begin with what looks like a valid IPv4 header:
+    /// version 4 in the high nibble and an IHL of at least 5 in the low nibble
+    /// (i.e. a first byte of `0x45..=0x4F`).
+    fn has_ipv4_header(bytes: &[u8]) -> bool {
+        match bytes.first() {
+            Some(&b) => (b >> 4) == 4 && (b & 0x0F) >= 5,
+            None => false,
+        }
+    }
+
     /// Parse the ICMP message from bytes starting at the ICMP type byte.
     fn parse_icmp(bytes: &[u8]) -> Result<Self, PacketParseError> {
         // NOTE(jwall): All ICMP packets are at least 8 bytes long.
@@ -1195,5 +1224,47 @@ mod tests {
         // The raw parser strips a (here nonexistent) IPv4 header, so the same
         // header-less bytes must not parse cleanly as if they were raw.
         assert!(Icmpv4Packet::parse(&icmp).is_err());
+    }
+
+    #[test]
+    fn icmpv4_parse_auto_detects_header() {
+        let icmp = [
+            0x00, 0x00, // type, code
+            0x00, 0x00, // checksum
+            0x00, 0x2a, // identifier = 42
+            0x00, 0x01, // sequence = 1
+            0x01, 0x02, 0x03, 0x04, // payload
+        ];
+
+        let check = |pkt: Icmpv4Packet| {
+            assert_eq!(pkt.typ, 0);
+            if let Icmpv4Message::EchoReply {
+                identifier,
+                sequence,
+                ..
+            } = pkt.message
+            {
+                assert_eq!(identifier, 42);
+                assert_eq!(sequence, 1);
+            } else {
+                panic!("did not parse as EchoReply: {:?}", pkt.message);
+            }
+        };
+
+        // Header-less bytes (Linux dgram): parsed directly.
+        check(Icmpv4Packet::parse_auto(&icmp).unwrap());
+
+        // With a 20 byte IPv4 header (raw, or macOS dgram): header detected and
+        // stripped.
+        let mut with_header = vec![0u8; 20];
+        with_header[0] = 0x45;
+        with_header.extend_from_slice(&icmp);
+        check(Icmpv4Packet::parse_auto(&with_header).unwrap());
+
+        // With a 24 byte IPv4 header carrying options (IHL 6): still detected.
+        let mut with_options = vec![0u8; 24];
+        with_options[0] = 0x46;
+        with_options.extend_from_slice(&icmp);
+        check(Icmpv4Packet::parse_auto(&with_options).unwrap());
     }
 }

@@ -61,22 +61,12 @@ pub struct Opts {
     pub timeout: Option<Duration>,
 }
 
-/// Whether an ICMPv4 socket was opened as a raw socket (the IP header is
-/// included on receive) or a datagram socket (no IP header). This determines
-/// how received bytes are parsed.
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum SocketKind {
-    Raw,
-    Dgram,
-}
-
 /// An ICMPv4 socket.
 pub struct IcmpSocket4 {
     bound_to: Option<Ipv4Addr>,
     buf: Vec<u8>,
     inner: Socket,
     opts: Opts,
-    kind: SocketKind,
 }
 
 impl IcmpSocket4 {
@@ -84,10 +74,10 @@ impl IcmpSocket4 {
     /// before it can be used to send and receive packets.
     pub fn new() -> std::io::Result<Self> {
         let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?;
-        Self::new_from_socket(socket, SocketKind::Raw)
+        Self::new_from_socket(socket)
     }
 
-    fn new_from_socket(socket: Socket, kind: SocketKind) -> std::io::Result<Self> {
+    fn new_from_socket(socket: Socket) -> std::io::Result<Self> {
         socket.set_recv_buffer_size(512)?;
         Ok(Self {
             bound_to: None,
@@ -97,7 +87,6 @@ impl IcmpSocket4 {
                 hops: 50,
                 timeout: None,
             },
-            kind,
         })
     }
 
@@ -105,18 +94,12 @@ impl IcmpSocket4 {
     /// before it can be used to send and receive packets.
     pub fn new_dgram_socket() -> std::io::Result<Self> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4))?;
-        Self::new_from_socket(socket, SocketKind::Dgram)
+        Self::new_from_socket(socket)
     }
 
     #[cfg(feature = "smol")]
     pub fn into_async(self) -> std::io::Result<crate::smol::AsyncIcmpV4Socket> {
-        crate::smol::AsyncIcmpV4Socket::new(
-            self.inner,
-            self.bound_to,
-            self.buf,
-            self.opts,
-            self.kind,
-        )
+        crate::smol::AsyncIcmpV4Socket::new(self.inner, self.bound_to, self.buf, self.opts)
     }
 }
 
@@ -152,11 +135,9 @@ impl IcmpSocket for IcmpSocket4 {
         let mut buf =
             unsafe { &mut *(self.buf.as_mut_slice() as *mut [u8] as *mut [MaybeUninit<u8>]) };
         let (read_count, addr) = self.inner.recv_from(&mut buf)?;
-        // A raw socket includes the IPv4 header; a dgram socket does not.
-        let packet = match self.kind {
-            SocketKind::Raw => Icmpv4Packet::parse(&self.buf[0..read_count])?,
-            SocketKind::Dgram => Icmpv4Packet::parse_dgram(&self.buf[0..read_count])?,
-        };
+        // Whether an IPv4 header is present depends on the OS and socket type,
+        // so detect it from the bytes rather than assuming.
+        let packet = Icmpv4Packet::parse_auto(&self.buf[0..read_count])?;
         Ok((packet, addr))
     }
 

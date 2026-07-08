@@ -1,0 +1,70 @@
+// Copyright 2021 Jeremy Wall
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//! On-the-wire smoke test that validates the datagram receive path against a
+//! real kernel.
+//!
+//! This is where our cross-platform assumption is actually exercised: Linux
+//! datagram sockets deliver ICMP replies without an IPv4 header while macOS
+//! includes it, and `parse_auto` must decode both. It is `#[ignore]`d because
+//! it needs a working ICMP datagram socket (on Linux that means
+//! `net.ipv4.ping_group_range` must include the running user's gid). Run it
+//! explicitly with `cargo test -- --ignored`.
+use std::net::Ipv4Addr;
+use std::time::Duration;
+
+use icmp_socket::packet::WithEchoRequest;
+use icmp_socket::socket::IcmpSocket;
+use icmp_socket::*;
+
+#[test]
+#[ignore]
+fn dgram_loopback_roundtrip() {
+    let localhost = Ipv4Addr::new(127, 0, 0, 1);
+    let mut socket = match IcmpSocket4::new_dgram_socket() {
+        Ok(s) => s,
+        Err(e) => panic!(
+            "could not open an ICMP datagram socket ({}); on Linux set \
+             net.ipv4.ping_group_range to include this user's gid",
+            e
+        ),
+    };
+    socket
+        .bind(Ipv4Addr::new(0, 0, 0, 0))
+        .expect("failed to bind");
+    socket.set_timeout(Some(Duration::from_secs(2)));
+
+    let request = Icmpv4Packet::with_echo_request(42, 1, vec![0x20; 16]).unwrap();
+    socket.send_to(localhost, request).expect("failed to send");
+
+    // Read until we see the reply for our destination or time out. The kernel
+    // may rewrite the identifier on datagram sockets, so match on the reply
+    // type and sequence rather than the identifier.
+    loop {
+        let (resp, addr) = socket.rcv_from().expect("failed to receive a reply");
+        let from = *addr
+            .as_socket_ipv4()
+            .expect("reply was not an IPv4 address")
+            .ip();
+        if from != localhost {
+            continue;
+        }
+        match resp.message {
+            Icmpv4Message::EchoReply { sequence, .. } => {
+                assert_eq!(sequence, 1, "unexpected sequence in reply");
+                return;
+            }
+            other => panic!("expected an EchoReply, got {:?}", other),
+        }
+    }
+}

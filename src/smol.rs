@@ -27,7 +27,7 @@ use socket2::{SockAddr, Socket};
 
 use crate::{
     packet::Icmpv4Packet,
-    socket::{ip_to_socket, Opts, SocketKind},
+    socket::{ip_to_socket, Opts},
 };
 
 /// An async ICMPv4 socket driven by the smol reactor.
@@ -36,7 +36,6 @@ pub struct AsyncIcmpV4Socket {
     bound_to: Option<Ipv4Addr>,
     buf: Vec<u8>,
     opts: Opts,
-    kind: SocketKind,
 }
 
 impl AsyncIcmpV4Socket {
@@ -48,14 +47,12 @@ impl AsyncIcmpV4Socket {
         bound_to: Option<Ipv4Addr>,
         buf: Vec<u8>,
         opts: Opts,
-        kind: SocketKind,
     ) -> std::io::Result<Self> {
         Ok(Self {
             inner: Async::new(inner)?,
             bound_to,
             buf,
             opts,
-            kind,
         })
     }
 
@@ -133,7 +130,6 @@ impl AsyncIcmpSocket for AsyncIcmpV4Socket {
 
     async fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
         let timeout = self.opts.timeout;
-        let kind = self.kind;
         let inner = &self.inner;
         let buf = &mut self.buf;
         // NOTE(jwall): the `recv_from` implementation promises not to write
@@ -156,11 +152,9 @@ impl AsyncIcmpSocket for AsyncIcmpV4Socket {
             }
             None => recv.await?,
         };
-        // A raw socket includes the IPv4 header; a dgram socket does not.
-        let pkt = match kind {
-            SocketKind::Raw => Icmpv4Packet::parse(&self.buf[0..read_count])?,
-            SocketKind::Dgram => Icmpv4Packet::parse_dgram(&self.buf[0..read_count])?,
-        };
+        // Whether an IPv4 header is present depends on the OS and socket type,
+        // so detect it from the bytes rather than assuming.
+        let pkt = Icmpv4Packet::parse_auto(&self.buf[0..read_count])?;
         Ok((pkt, addr))
     }
 }

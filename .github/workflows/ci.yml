@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: cargo --version && rustc --version
+
+      - name: Build (default features)
+        run: cargo build --all-targets
+
+      - name: Test (default features)
+        run: cargo test
+
+      - name: Build (smol feature)
+        run: cargo build --features smol --all-targets
+
+      - name: Test (smol feature)
+        run: cargo test --features smol
+
+      # Validate the datagram receive path against the real kernel on each OS.
+      # This is what proves parse_auto handles both the Linux (no IP header)
+      # and macOS (IP header included) delivery behaviors, rather than trusting
+      # a single developer's machine.
+      - name: Allow unprivileged ICMP datagram sockets (Linux)
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+
+      - name: Loopback ping smoke test
+        run: cargo test --features smol -- --ignored
