@@ -38,5 +38,8 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
 
+      # Run serially: these tests share the loopback interface, and macOS
+      # datagram sockets share identifier 0, so replies are not demuxed between
+      # concurrent sockets.
       - name: Loopback ping smoke test
-        run: cargo test --features smol -- --ignored
+        run: cargo test --features smol -- --ignored --test-threads=1

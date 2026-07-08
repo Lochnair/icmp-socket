@@ -61,12 +61,63 @@ fn dgram_loopback_roundtrip() {
             resp.verify_checksum(),
             "loopback reply failed checksum verification"
         );
-        match resp.message {
-            Icmpv4Message::EchoReply { sequence, .. } => {
-                assert_eq!(sequence, 1, "unexpected sequence in reply");
+        // Match our own sequence; ignore any stray ICMP on the loopback
+        // interface (on macOS datagram sockets share identifier 0).
+        if let Icmpv4Message::EchoReply { sequence, .. } = resp.message {
+            if sequence == 1 {
                 return;
             }
-            other => panic!("expected an EchoReply, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn dgram_recv_buffer_truncation() {
+    let localhost = Ipv4Addr::new(127, 0, 0, 1);
+    let mut socket = match DgramIcmpSocket4::new() {
+        Ok(s) => s,
+        Err(e) => panic!("could not open an ICMP datagram socket ({})", e),
+    };
+    socket
+        .bind(Ipv4Addr::new(0, 0, 0, 0))
+        .expect("failed to bind");
+    socket.set_timeout(Some(Duration::from_secs(2)));
+
+    // An 8 byte buffer cannot hold the echo reply, so rcv_from must report a
+    // truncation error rather than a partial packet.
+    socket.set_read_buffer_size(8);
+    socket
+        .send(localhost, 1, vec![0x20; 32])
+        .expect("failed to send");
+    let err = socket
+        .rcv_from()
+        .expect_err("expected a truncation error with an 8 byte buffer");
+    assert!(
+        err.to_string().contains("truncat"),
+        "expected a truncation error, got: {}",
+        err
+    );
+
+    // With a large buffer the same exchange succeeds.
+    socket.set_read_buffer_size(2048);
+    socket
+        .send(localhost, 2, vec![0x20; 32])
+        .expect("failed to send");
+    loop {
+        let (resp, addr) = socket.rcv_from().expect("failed to receive a reply");
+        if *addr
+            .as_socket_ipv4()
+            .expect("reply was not an IPv4 address")
+            .ip()
+            != localhost
+        {
+            continue;
+        }
+        if let Icmpv4Message::EchoReply { sequence, .. } = resp.message {
+            if sequence == 2 {
+                return;
+            }
         }
     }
 }

@@ -28,7 +28,7 @@ use socket2::{SockAddr, Socket};
 
 use crate::{
     packet::{Icmpv4Packet, WithEchoRequest},
-    socket::{ip_to_socket, Opts},
+    socket::{ip_to_socket, truncated_error, Opts},
 };
 
 /// Shared low-level state and operations for the async ICMPv4 sockets, mirroring
@@ -68,6 +68,10 @@ impl AsyncIcmp4Core {
         Ok(addr.as_socket_ipv4().map(|s| s.port()).unwrap_or(0))
     }
 
+    fn set_read_buffer_size(&mut self, size: usize) {
+        self.buf.resize(size, 0);
+    }
+
     async fn send_bytes(&self, dest: Ipv4Addr, bytes: &[u8]) -> std::io::Result<()> {
         self.inner.get_ref().set_ttl(self.opts.hops)?;
         let dest: SockAddr = ip_to_socket(&IpAddr::V4(dest)).into();
@@ -101,6 +105,10 @@ impl AsyncIcmp4Core {
             }
             None => recv.await?,
         };
+        // A full buffer means the packet may have been truncated on read.
+        if read_count == self.buf.len() {
+            return Err(truncated_error());
+        }
         // Whether an IPv4 header is present depends on the OS and socket type,
         // so detect it from the bytes rather than assuming.
         let pkt = Icmpv4Packet::parse_auto(&self.buf[0..read_count])?;
@@ -130,6 +138,13 @@ impl AsyncIcmpV4Socket {
     /// The address this socket has been bound to, if any.
     pub fn bound_to(&self) -> Option<Ipv4Addr> {
         self.core.bound_to
+    }
+
+    /// Set the size of the per-read receive buffer (default 2048 bytes). A
+    /// packet larger than this is truncated on read, and `rcv_from` reports a
+    /// possible truncation rather than returning a partial packet.
+    pub fn set_read_buffer_size(&mut self, size: usize) {
+        self.core.set_read_buffer_size(size);
     }
 }
 
@@ -221,6 +236,13 @@ impl AsyncDgramIcmpV4Socket {
     /// The address this socket has been bound to, if any.
     pub fn bound_to(&self) -> Option<Ipv4Addr> {
         self.core.bound_to
+    }
+
+    /// Set the size of the per-read receive buffer (default 2048 bytes). A
+    /// packet larger than this is truncated on read, and `rcv_from` reports a
+    /// possible truncation rather than returning a partial packet.
+    pub fn set_read_buffer_size(&mut self, size: usize) {
+        self.core.set_read_buffer_size(size);
     }
 
     /// The ICMP identifier this socket uses on the wire. Match replies against

@@ -61,6 +61,12 @@ pub struct Opts {
     pub timeout: Option<Duration>,
 }
 
+/// Default size of the per-read receive buffer. Sized with headroom over a
+/// typical Ethernet MTU so an ordinary reply never fills the buffer exactly
+/// (which would be reported as a possible truncation). Larger replies need a
+/// bigger buffer via `set_read_buffer_size`.
+const DEFAULT_RECV_BUFFER_SIZE: usize = 2048;
+
 /// Shared low-level state and operations for the ICMPv4 sockets. This keeps the
 /// public socket types thin: the raw and datagram sockets differ only in how a
 /// packet is sent, not in binding, receiving, or option handling.
@@ -73,11 +79,10 @@ struct Icmp4Core {
 
 impl Icmp4Core {
     fn from_socket(inner: Socket) -> std::io::Result<Self> {
-        inner.set_recv_buffer_size(512)?;
         Ok(Self {
             inner,
             bound_to: None,
-            buf: vec![0; 512],
+            buf: vec![0; DEFAULT_RECV_BUFFER_SIZE],
             opts: Opts {
                 hops: 50,
                 timeout: None,
@@ -89,6 +94,10 @@ impl Icmp4Core {
         self.bound_to = Some(addr);
         let sock = ip_to_socket(&IpAddr::V4(addr));
         self.inner.bind(&(sock.into()))
+    }
+
+    fn set_read_buffer_size(&mut self, size: usize) {
+        self.buf.resize(size, 0);
     }
 
     /// The bound local port. On a datagram (ping) socket this is the ICMP
@@ -113,11 +122,26 @@ impl Icmp4Core {
         let mut buf =
             unsafe { &mut *(self.buf.as_mut_slice() as *mut [u8] as *mut [MaybeUninit<u8>]) };
         let (read_count, addr) = self.inner.recv_from(&mut buf)?;
+        // A full buffer means the packet may have been truncated on read. Report
+        // it rather than silently returning a partial packet.
+        if read_count == self.buf.len() {
+            return Err(truncated_error());
+        }
         // Whether an IPv4 header is present depends on the OS and socket type,
         // so detect it from the bytes rather than assuming.
         let packet = Icmpv4Packet::parse_auto(&self.buf[0..read_count])?;
         Ok((packet, addr))
     }
+}
+
+/// The error returned when a received packet filled the read buffer and may
+/// therefore have been truncated.
+pub(crate) fn truncated_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "received packet filled the read buffer and may be truncated; \
+         increase it with set_read_buffer_size",
+    )
 }
 
 /// A raw (SOCK_RAW) ICMPv4 socket. Requires elevated privileges. The caller
@@ -139,6 +163,13 @@ impl IcmpSocket4 {
     /// The address this socket has been bound to, if any.
     pub fn bound_to(&self) -> Option<Ipv4Addr> {
         self.core.bound_to
+    }
+
+    /// Set the size of the per-read receive buffer (default 2048 bytes). A
+    /// packet larger than this is truncated on read, and `rcv_from` reports a
+    /// possible truncation rather than returning a partial packet.
+    pub fn set_read_buffer_size(&mut self, size: usize) {
+        self.core.set_read_buffer_size(size);
     }
 
     #[cfg(feature = "smol")]
@@ -217,6 +248,13 @@ impl DgramIcmpSocket4 {
         self.core.bound_to
     }
 
+    /// Set the size of the per-read receive buffer (default 2048 bytes). A
+    /// packet larger than this is truncated on read, and `rcv_from` reports a
+    /// possible truncation rather than returning a partial packet.
+    pub fn set_read_buffer_size(&mut self, size: usize) {
+        self.core.set_read_buffer_size(size);
+    }
+
     /// The ICMP identifier this socket uses on the wire. Use it to match replies
     /// that belong to this socket. Meaningful only after [`Self::bind`].
     ///
@@ -280,16 +318,22 @@ impl IcmpSocket6 {
     }
 
     fn new_from_socket(socket: Socket) -> std::io::Result<Self> {
-        socket.set_recv_buffer_size(512)?;
         Ok(Self {
             bound_to: None,
             inner: socket,
-            buf: vec![0; 512],
+            buf: vec![0; DEFAULT_RECV_BUFFER_SIZE],
             opts: Opts {
                 hops: 50,
                 timeout: None,
             },
         })
+    }
+
+    /// Set the size of the per-read receive buffer (default 2048 bytes). A
+    /// packet larger than this is truncated on read, and `rcv_from` reports a
+    /// possible truncation rather than returning a partial packet.
+    pub fn set_read_buffer_size(&mut self, size: usize) {
+        self.buf.resize(size, 0);
     }
 }
 
@@ -339,6 +383,10 @@ impl IcmpSocket for IcmpSocket6 {
         let mut buf =
             unsafe { &mut *(self.buf.as_mut_slice() as *mut [u8] as *mut [MaybeUninit<u8>]) };
         let (read_count, addr) = self.inner.recv_from(&mut buf)?;
+        // A full buffer means the packet may have been truncated on read.
+        if read_count == self.buf.len() {
+            return Err(truncated_error());
+        }
         Ok((self.buf[0..read_count].try_into()?, addr))
     }
 
