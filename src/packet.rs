@@ -703,14 +703,14 @@ pub struct Icmpv4Packet {
 }
 
 impl Icmpv4Packet {
-    /// Parse an Icmpv4Packet from bytes including the IPv4 header.
+    /// Parse an Icmpv4Packet from bytes including the IPv4 header, as delivered
+    /// by a raw (SOCK_RAW) socket.
     pub fn parse<B: AsRef<[u8]>>(bytes: B) -> Result<Self, PacketParseError> {
-        let mut bytes = bytes.as_ref();
-        let mut packet_len = bytes.len();
+        let bytes = bytes.as_ref();
         // NOTE(jwall): We need at least a minimal 20 byte IPv4 header before we
         // can even read the header length field.
         if bytes.len() < 20 {
-            return Err(PacketParseError::PacketTooSmall(packet_len));
+            return Err(PacketParseError::PacketTooSmall(bytes.len()));
         }
         // NOTE(jwall): Because we use raw sockets the packet is prefixed with the
         // IPv4 header. Its length is variable and lives in the low nibble of the
@@ -720,11 +720,24 @@ impl Icmpv4Packet {
         // A valid IPv4 header is between 20 and 60 bytes, must fit within the
         // buffer, and must leave room for the 8 byte minimum ICMP message.
         if header_len < 20 || bytes.len() < header_len + 8 {
+            return Err(PacketParseError::PacketTooSmall(bytes.len()));
+        }
+        Self::parse_icmp(&bytes[header_len..])
+    }
+
+    /// Parse an Icmpv4Packet from bytes that begin at the ICMP header with no
+    /// preceding IPv4 header, as delivered by a datagram (SOCK_DGRAM) socket.
+    pub fn parse_dgram<B: AsRef<[u8]>>(bytes: B) -> Result<Self, PacketParseError> {
+        Self::parse_icmp(bytes.as_ref())
+    }
+
+    /// Parse the ICMP message from bytes starting at the ICMP type byte.
+    fn parse_icmp(bytes: &[u8]) -> Result<Self, PacketParseError> {
+        // NOTE(jwall): All ICMP packets are at least 8 bytes long.
+        let packet_len = bytes.len();
+        if packet_len < 8 {
             return Err(PacketParseError::PacketTooSmall(packet_len));
         }
-        bytes = &bytes[header_len..];
-        // NOTE(jwall): All ICMP packets are at least 8 bytes long.
-        packet_len = bytes.len();
         let (typ, code, checksum) = (bytes[0], bytes[1], BigEndian::read_u16(&bytes[2..4]));
         let message = match typ {
             3 => Icmpv4Message::Unreachable {
@@ -1152,5 +1165,35 @@ mod tests {
             Icmpv4Packet::parse(&buf),
             Err(PacketParseError::PacketTooSmall(_))
         ));
+    }
+
+    #[test]
+    fn icmpv4_parse_dgram_has_no_ip_header() {
+        // Datagram (SOCK_DGRAM) sockets deliver the ICMP message with no IPv4
+        // header, so parse_dgram must not strip anything.
+        let icmp = [
+            0x00, 0x00, // type, code
+            0x00, 0x00, // checksum
+            0x00, 0x2a, // identifier = 42
+            0x00, 0x01, // sequence = 1
+            0x01, 0x02, 0x03, 0x04, // payload
+        ];
+        let pkt = Icmpv4Packet::parse_dgram(&icmp).unwrap();
+        assert_eq!(pkt.typ, 0);
+        if let Icmpv4Message::EchoReply {
+            identifier,
+            sequence,
+            payload,
+        } = pkt.message
+        {
+            assert_eq!(identifier, 42);
+            assert_eq!(sequence, 1);
+            assert_eq!(payload, vec![1, 2, 3, 4]);
+        } else {
+            panic!("did not parse as EchoReply: {:?}", pkt.message);
+        }
+        // The raw parser strips a (here nonexistent) IPv4 header, so the same
+        // header-less bytes must not parse cleanly as if they were raw.
+        assert!(Icmpv4Packet::parse(&icmp).is_err());
     }
 }
