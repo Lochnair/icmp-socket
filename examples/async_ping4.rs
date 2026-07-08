@@ -70,6 +70,10 @@ fn main() -> std::io::Result<()> {
                         if addr != parsed_addr {
                             continue;
                         }
+                        if !resp.verify_checksum() {
+                            eprintln!("Discarding packet with invalid checksum");
+                            continue;
+                        }
                         if let Icmpv4Message::EchoReply {
                             sequence: seq,
                             payload,

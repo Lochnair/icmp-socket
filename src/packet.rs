@@ -335,6 +335,14 @@ impl Icmpv6Packet {
         self
     }
 
+    /// Verify the packet's checksum against the given source and destination
+    /// addresses. An ICMPv6 checksum covers the IPv6 pseudo-header, so both
+    /// addresses are required: `dest` is the address the packet was received on
+    /// and `source` is the address it came from.
+    pub fn verify_checksum(&self, source: &Ipv6Addr, dest: &Ipv6Addr) -> bool {
+        self.calculate_checksum(source, dest) == self.checksum
+    }
+
     /// Construct a packet for Packet Too Big messages.
     pub fn with_packet_too_big(mtu: u32, packet: Vec<u8>) -> Result<Self, IcmpPacketBuildError> {
         Ok(Self {
@@ -874,6 +882,13 @@ impl Icmpv4Packet {
         self.checksum = self.calculate_checksum();
         self
     }
+
+    /// Verify the packet's checksum. Returns true when the stored checksum
+    /// matches the one computed over the message. An ICMPv4 checksum covers only
+    /// the ICMP message, so no addresses are needed.
+    pub fn verify_checksum(&self) -> bool {
+        self.calculate_checksum() == self.checksum
+    }
 }
 
 impl TryFrom<&[u8]> for Icmpv4Packet {
@@ -1266,5 +1281,34 @@ mod tests {
         with_options[0] = 0x46;
         with_options.extend_from_slice(&icmp);
         check(Icmpv4Packet::parse_auto(&with_options).unwrap());
+    }
+
+    #[test]
+    fn icmpv4_verify_checksum() {
+        let good = Icmpv4Packet::with_echo_request(42, 1, vec![1, 2, 3, 4])
+            .unwrap()
+            .with_checksum();
+        assert!(good.verify_checksum());
+
+        // A wrong checksum must not verify.
+        let mut bad = Icmpv4Packet::with_echo_request(42, 1, vec![1, 2, 3, 4])
+            .unwrap()
+            .with_checksum();
+        bad.checksum ^= 0xFFFF;
+        assert!(!bad.verify_checksum());
+    }
+
+    #[test]
+    fn icmpv6_verify_checksum() {
+        let lo = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
+        let good = Icmpv6Packet::with_echo_request(42, 1, vec![1, 2, 3, 4])
+            .unwrap()
+            .with_checksum(&lo, &lo);
+        assert!(good.verify_checksum(&lo, &lo));
+
+        // A wrong checksum must not verify.
+        let mut bad = good;
+        bad.checksum ^= 0xFFFF;
+        assert!(!bad.verify_checksum(&lo, &lo));
     }
 }

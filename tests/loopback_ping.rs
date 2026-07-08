@@ -56,6 +56,11 @@ fn dgram_loopback_roundtrip() {
         if from != localhost {
             continue;
         }
+        // The reply came from a real kernel; its ICMP checksum must verify.
+        assert!(
+            resp.verify_checksum(),
+            "loopback reply failed checksum verification"
+        );
         match resp.message {
             Icmpv4Message::EchoReply { sequence, .. } => {
                 assert_eq!(sequence, 1, "unexpected sequence in reply");

@@ -83,6 +83,10 @@ pub fn main() {
                     break;
                 }
             };
+            if !resp.verify_checksum() {
+                eprintln!("Discarding packet with invalid checksum");
+                continue;
+            }
             if packet_handler(resp, send_time, *sock_addr.as_socket_ipv4().unwrap().ip()).is_some()
             {
                 std::thread::sleep(Duration::from_secs(1));
