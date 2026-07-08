@@ -27,3 +27,7 @@ optional = true
 [features]
 default = []
 smol = ["dep:smol", "dep:async-trait"]
+
+[[example]]
+name = "async_ping4"
+required-features = ["smol"]
