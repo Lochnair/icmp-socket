@@ -40,6 +40,7 @@
 //! #     "a payload big enough to matter".as_bytes().to_vec()
 //! # ).unwrap();
 //! # let mut byte_buffer = vec![0; 20];
+//! # byte_buffer[0] = 0x45; // IPv4 version with a 5 word (20 byte) header.
 //! # byte_buffer.extend(packet.get_bytes(true)); // convert a packet to bytes with a checksum.
 //! let parsed_packet = Icmpv4Packet::try_from(byte_buffer.as_slice()).unwrap();
 //! ```
@@ -706,11 +707,22 @@ impl Icmpv4Packet {
     pub fn parse<B: AsRef<[u8]>>(bytes: B) -> Result<Self, PacketParseError> {
         let mut bytes = bytes.as_ref();
         let mut packet_len = bytes.len();
-        if bytes.len() < 28 {
+        // NOTE(jwall): We need at least a minimal 20 byte IPv4 header before we
+        // can even read the header length field.
+        if bytes.len() < 20 {
             return Err(PacketParseError::PacketTooSmall(packet_len));
         }
-        // NOTE(jwall) Because we use raw sockets the first 20 bytes are the IPv4 header.
-        bytes = &bytes[20..];
+        // NOTE(jwall): Because we use raw sockets the packet is prefixed with the
+        // IPv4 header. Its length is variable and lives in the low nibble of the
+        // first byte (the IHL field), counted in 32 bit words. Assuming a fixed
+        // 20 bytes misparses any packet that carries IP options.
+        let header_len = ((bytes[0] & 0x0F) as usize) * 4;
+        // A valid IPv4 header is between 20 and 60 bytes, must fit within the
+        // buffer, and must leave room for the 8 byte minimum ICMP message.
+        if header_len < 20 || bytes.len() < header_len + 8 {
+            return Err(PacketParseError::PacketTooSmall(packet_len));
+        }
+        bytes = &bytes[header_len..];
         // NOTE(jwall): All ICMP packets are at least 8 bytes long.
         packet_len = bytes.len();
         let (typ, code, checksum) = (bytes[0], bytes[1], BigEndian::read_u16(&bytes[2..4]));
@@ -1088,5 +1100,57 @@ mod tests {
         }
         assert_eq!(pkt.get_bytes(true), data);
         assert_eq!(pkt.calculate_checksum(lo, lo), 0x1c2e);
+    }
+
+    #[test]
+    fn icmpv4_parse_respects_variable_ihl() {
+        // A minimal ICMP EchoReply (type 0): identifier=42, sequence=1, payload=[1,2,3,4].
+        let icmp = [
+            0x00, 0x00, // type, code
+            0x00, 0x00, // checksum
+            0x00, 0x2a, // identifier = 42
+            0x00, 0x01, // sequence = 1
+            0x01, 0x02, 0x03, 0x04, // payload
+        ];
+        // Build a raw buffer prefixed with an IPv4 header of the given IHL
+        // (header length in 32 bit words). The header contents past the first
+        // byte are irrelevant to the parser.
+        let build = |ihl: u8| {
+            let mut buf = vec![0u8; (ihl as usize) * 4];
+            buf[0] = 0x40 | ihl; // version 4, given IHL
+            buf.extend_from_slice(&icmp);
+            buf
+        };
+        // IHL 5 is the common no-options case; 6..=8 exercise IP options.
+        for ihl in 5..=8u8 {
+            let pkt = Icmpv4Packet::parse(&build(ihl))
+                .unwrap_or_else(|e| panic!("IHL {} failed to parse: {:?}", ihl, e));
+            assert_eq!(pkt.typ, 0);
+            assert_eq!(pkt.code, 0);
+            if let Icmpv4Message::EchoReply {
+                identifier,
+                sequence,
+                payload,
+            } = pkt.message
+            {
+                assert_eq!(identifier, 42);
+                assert_eq!(sequence, 1);
+                assert_eq!(payload, vec![1, 2, 3, 4]);
+            } else {
+                panic!("IHL {} did not parse as EchoReply: {:?}", ihl, pkt.message);
+            }
+        }
+    }
+
+    #[test]
+    fn icmpv4_parse_rejects_short_header() {
+        // An IHL of 4 words (16 bytes) is below the 20 byte IPv4 minimum, even
+        // though the buffer itself is long enough to look plausible.
+        let mut buf = vec![0u8; 16 + 12];
+        buf[0] = 0x44;
+        assert!(matches!(
+            Icmpv4Packet::parse(&buf),
+            Err(PacketParseError::PacketTooSmall(_))
+        ));
     }
 }
