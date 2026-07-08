@@ -774,7 +774,6 @@ impl Icmpv4Packet {
                 }
             }
             t => {
-                dbg!(bytes);
                 return Err(PacketParseError::UnrecognizedICMPType(t));
             }
         };
