@@ -19,4 +19,6 @@ pub mod packet;
 pub mod socket;
 
 pub use packet::{Icmpv4Message, Icmpv4Packet, Icmpv6Message, Icmpv6Packet};
-pub use socket::{IcmpSocket, IcmpSocket4, IcmpSocket6};
+pub use socket::{DgramIcmpSocket4, IcmpSocket, IcmpSocket4, IcmpSocket6};
+#[cfg(feature = "smol")]
+pub mod smol;

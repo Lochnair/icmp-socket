@@ -40,6 +40,7 @@
 //! #     "a payload big enough to matter".as_bytes().to_vec()
 //! # ).unwrap();
 //! # let mut byte_buffer = vec![0; 20];
+//! # byte_buffer[0] = 0x45; // IPv4 version with a 5 word (20 byte) header.
 //! # byte_buffer.extend(packet.get_bytes(true)); // convert a packet to bytes with a checksum.
 //! let parsed_packet = Icmpv4Packet::try_from(byte_buffer.as_slice()).unwrap();
 //! ```
@@ -332,6 +333,14 @@ impl Icmpv6Packet {
     pub fn with_checksum(mut self, source: &Ipv6Addr, dest: &Ipv6Addr) -> Self {
         self.checksum = self.calculate_checksum(source, dest);
         self
+    }
+
+    /// Verify the packet's checksum against the given source and destination
+    /// addresses. An ICMPv6 checksum covers the IPv6 pseudo-header, so both
+    /// addresses are required: `dest` is the address the packet was received on
+    /// and `source` is the address it came from.
+    pub fn verify_checksum(&self, source: &Ipv6Addr, dest: &Ipv6Addr) -> bool {
+        self.calculate_checksum(source, dest) == self.checksum
     }
 
     /// Construct a packet for Packet Too Big messages.
@@ -702,17 +711,70 @@ pub struct Icmpv4Packet {
 }
 
 impl Icmpv4Packet {
-    /// Parse an Icmpv4Packet from bytes including the IPv4 header.
+    /// Parse an Icmpv4Packet from bytes including the IPv4 header, as delivered
+    /// by a raw (SOCK_RAW) socket.
     pub fn parse<B: AsRef<[u8]>>(bytes: B) -> Result<Self, PacketParseError> {
-        let mut bytes = bytes.as_ref();
-        let mut packet_len = bytes.len();
-        if bytes.len() < 28 {
+        let bytes = bytes.as_ref();
+        // NOTE(jwall): We need at least a minimal 20 byte IPv4 header before we
+        // can even read the header length field.
+        if bytes.len() < 20 {
+            return Err(PacketParseError::PacketTooSmall(bytes.len()));
+        }
+        // NOTE(jwall): Because we use raw sockets the packet is prefixed with the
+        // IPv4 header. Its length is variable and lives in the low nibble of the
+        // first byte (the IHL field), counted in 32 bit words. Assuming a fixed
+        // 20 bytes misparses any packet that carries IP options.
+        let header_len = ((bytes[0] & 0x0F) as usize) * 4;
+        // A valid IPv4 header is between 20 and 60 bytes, must fit within the
+        // buffer, and must leave room for the 8 byte minimum ICMP message.
+        if header_len < 20 || bytes.len() < header_len + 8 {
+            return Err(PacketParseError::PacketTooSmall(bytes.len()));
+        }
+        Self::parse_icmp(&bytes[header_len..])
+    }
+
+    /// Parse an Icmpv4Packet from bytes that begin at the ICMP header with no
+    /// preceding IPv4 header, as delivered by a datagram (SOCK_DGRAM) socket.
+    pub fn parse_dgram<B: AsRef<[u8]>>(bytes: B) -> Result<Self, PacketParseError> {
+        Self::parse_icmp(bytes.as_ref())
+    }
+
+    /// Parse an Icmpv4Packet, auto-detecting whether the bytes are prefixed
+    /// with an IPv4 header.
+    ///
+    /// Whether the kernel includes the IPv4 header on receive is not a reliable
+    /// function of the socket type: raw sockets always include it, Linux
+    /// datagram (ping) sockets never do, and macOS datagram sockets do. Rather
+    /// than assume, we inspect the first byte: a valid IPv4 header begins with
+    /// version 4 and an IHL of at least 5 words (`0x45..=0x4F`). No IANA
+    /// assigned ICMP type falls in that range, so a real ICMP message is never
+    /// mistaken for an IPv4 header.
+    pub fn parse_auto<B: AsRef<[u8]>>(bytes: B) -> Result<Self, PacketParseError> {
+        let bytes = bytes.as_ref();
+        if Self::has_ipv4_header(bytes) {
+            Self::parse(bytes)
+        } else {
+            Self::parse_dgram(bytes)
+        }
+    }
+
+    /// Whether these bytes begin with what looks like a valid IPv4 header:
+    /// version 4 in the high nibble and an IHL of at least 5 in the low nibble
+    /// (i.e. a first byte of `0x45..=0x4F`).
+    fn has_ipv4_header(bytes: &[u8]) -> bool {
+        match bytes.first() {
+            Some(&b) => (b >> 4) == 4 && (b & 0x0F) >= 5,
+            None => false,
+        }
+    }
+
+    /// Parse the ICMP message from bytes starting at the ICMP type byte.
+    fn parse_icmp(bytes: &[u8]) -> Result<Self, PacketParseError> {
+        // NOTE(jwall): All ICMP packets are at least 8 bytes long.
+        let packet_len = bytes.len();
+        if packet_len < 8 {
             return Err(PacketParseError::PacketTooSmall(packet_len));
         }
-        // NOTE(jwall) Because we use raw sockets the first 20 bytes are the IPv4 header.
-        bytes = &bytes[20..];
-        // NOTE(jwall): All ICMP packets are at least 8 bytes long.
-        packet_len = bytes.len();
         let (typ, code, checksum) = (bytes[0], bytes[1], BigEndian::read_u16(&bytes[2..4]));
         let message = match typ {
             3 => Icmpv4Message::Unreachable {
@@ -774,7 +836,6 @@ impl Icmpv4Packet {
                 }
             }
             t => {
-                dbg!(bytes);
                 return Err(PacketParseError::UnrecognizedICMPType(t));
             }
         };
@@ -820,6 +881,13 @@ impl Icmpv4Packet {
     pub fn with_checksum(mut self) -> Self {
         self.checksum = self.calculate_checksum();
         self
+    }
+
+    /// Verify the packet's checksum. Returns true when the stored checksum
+    /// matches the one computed over the message. An ICMPv4 checksum covers only
+    /// the ICMP message, so no addresses are needed.
+    pub fn verify_checksum(&self) -> bool {
+        self.calculate_checksum() == self.checksum
     }
 }
 
@@ -1089,5 +1157,158 @@ mod tests {
         }
         assert_eq!(pkt.get_bytes(true), data);
         assert_eq!(pkt.calculate_checksum(lo, lo), 0x1c2e);
+    }
+
+    #[test]
+    fn icmpv4_parse_respects_variable_ihl() {
+        // A minimal ICMP EchoReply (type 0): identifier=42, sequence=1, payload=[1,2,3,4].
+        let icmp = [
+            0x00, 0x00, // type, code
+            0x00, 0x00, // checksum
+            0x00, 0x2a, // identifier = 42
+            0x00, 0x01, // sequence = 1
+            0x01, 0x02, 0x03, 0x04, // payload
+        ];
+        // Build a raw buffer prefixed with an IPv4 header of the given IHL
+        // (header length in 32 bit words). The header contents past the first
+        // byte are irrelevant to the parser.
+        let build = |ihl: u8| {
+            let mut buf = vec![0u8; (ihl as usize) * 4];
+            buf[0] = 0x40 | ihl; // version 4, given IHL
+            buf.extend_from_slice(&icmp);
+            buf
+        };
+        // IHL 5 is the common no-options case; 6..=8 exercise IP options.
+        for ihl in 5..=8u8 {
+            let pkt = Icmpv4Packet::parse(&build(ihl))
+                .unwrap_or_else(|e| panic!("IHL {} failed to parse: {:?}", ihl, e));
+            assert_eq!(pkt.typ, 0);
+            assert_eq!(pkt.code, 0);
+            if let Icmpv4Message::EchoReply {
+                identifier,
+                sequence,
+                payload,
+            } = pkt.message
+            {
+                assert_eq!(identifier, 42);
+                assert_eq!(sequence, 1);
+                assert_eq!(payload, vec![1, 2, 3, 4]);
+            } else {
+                panic!("IHL {} did not parse as EchoReply: {:?}", ihl, pkt.message);
+            }
+        }
+    }
+
+    #[test]
+    fn icmpv4_parse_rejects_short_header() {
+        // An IHL of 4 words (16 bytes) is below the 20 byte IPv4 minimum, even
+        // though the buffer itself is long enough to look plausible.
+        let mut buf = vec![0u8; 16 + 12];
+        buf[0] = 0x44;
+        assert!(matches!(
+            Icmpv4Packet::parse(&buf),
+            Err(PacketParseError::PacketTooSmall(_))
+        ));
+    }
+
+    #[test]
+    fn icmpv4_parse_dgram_has_no_ip_header() {
+        // Datagram (SOCK_DGRAM) sockets deliver the ICMP message with no IPv4
+        // header, so parse_dgram must not strip anything.
+        let icmp = [
+            0x00, 0x00, // type, code
+            0x00, 0x00, // checksum
+            0x00, 0x2a, // identifier = 42
+            0x00, 0x01, // sequence = 1
+            0x01, 0x02, 0x03, 0x04, // payload
+        ];
+        let pkt = Icmpv4Packet::parse_dgram(&icmp).unwrap();
+        assert_eq!(pkt.typ, 0);
+        if let Icmpv4Message::EchoReply {
+            identifier,
+            sequence,
+            payload,
+        } = pkt.message
+        {
+            assert_eq!(identifier, 42);
+            assert_eq!(sequence, 1);
+            assert_eq!(payload, vec![1, 2, 3, 4]);
+        } else {
+            panic!("did not parse as EchoReply: {:?}", pkt.message);
+        }
+        // The raw parser strips a (here nonexistent) IPv4 header, so the same
+        // header-less bytes must not parse cleanly as if they were raw.
+        assert!(Icmpv4Packet::parse(&icmp).is_err());
+    }
+
+    #[test]
+    fn icmpv4_parse_auto_detects_header() {
+        let icmp = [
+            0x00, 0x00, // type, code
+            0x00, 0x00, // checksum
+            0x00, 0x2a, // identifier = 42
+            0x00, 0x01, // sequence = 1
+            0x01, 0x02, 0x03, 0x04, // payload
+        ];
+
+        let check = |pkt: Icmpv4Packet| {
+            assert_eq!(pkt.typ, 0);
+            if let Icmpv4Message::EchoReply {
+                identifier,
+                sequence,
+                ..
+            } = pkt.message
+            {
+                assert_eq!(identifier, 42);
+                assert_eq!(sequence, 1);
+            } else {
+                panic!("did not parse as EchoReply: {:?}", pkt.message);
+            }
+        };
+
+        // Header-less bytes (Linux dgram): parsed directly.
+        check(Icmpv4Packet::parse_auto(&icmp).unwrap());
+
+        // With a 20 byte IPv4 header (raw, or macOS dgram): header detected and
+        // stripped.
+        let mut with_header = vec![0u8; 20];
+        with_header[0] = 0x45;
+        with_header.extend_from_slice(&icmp);
+        check(Icmpv4Packet::parse_auto(&with_header).unwrap());
+
+        // With a 24 byte IPv4 header carrying options (IHL 6): still detected.
+        let mut with_options = vec![0u8; 24];
+        with_options[0] = 0x46;
+        with_options.extend_from_slice(&icmp);
+        check(Icmpv4Packet::parse_auto(&with_options).unwrap());
+    }
+
+    #[test]
+    fn icmpv4_verify_checksum() {
+        let good = Icmpv4Packet::with_echo_request(42, 1, vec![1, 2, 3, 4])
+            .unwrap()
+            .with_checksum();
+        assert!(good.verify_checksum());
+
+        // A wrong checksum must not verify.
+        let mut bad = Icmpv4Packet::with_echo_request(42, 1, vec![1, 2, 3, 4])
+            .unwrap()
+            .with_checksum();
+        bad.checksum ^= 0xFFFF;
+        assert!(!bad.verify_checksum());
+    }
+
+    #[test]
+    fn icmpv6_verify_checksum() {
+        let lo = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
+        let good = Icmpv6Packet::with_echo_request(42, 1, vec![1, 2, 3, 4])
+            .unwrap()
+            .with_checksum(&lo, &lo);
+        assert!(good.verify_checksum(&lo, &lo));
+
+        // A wrong checksum must not verify.
+        let mut bad = good;
+        bad.checksum ^= 0xFFFF;
+        assert!(!bad.verify_checksum(&lo, &lo));
     }
 }
