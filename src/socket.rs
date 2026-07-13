@@ -211,7 +211,7 @@ impl IcmpSocket for IcmpSocket4 {
 
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()> {
-        self.inner.bind_device(Some(interface_name.as_bytes()))
+        self.core.inner.bind_device(Some(interface_name.as_bytes()))
     }
 }
 
