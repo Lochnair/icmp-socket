@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use icmp_socket::*;
+use icmp_socket2::*;
 
 fn main() -> std::io::Result<()> {
     let address = std::env::args()

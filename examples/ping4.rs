@@ -16,9 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use icmp_socket::packet::WithEchoRequest;
-use icmp_socket::socket::IcmpSocket;
-use icmp_socket::*;
+use icmp_socket2::packet::WithEchoRequest;
+use icmp_socket2::socket::IcmpSocket;
+use icmp_socket2::*;
 
 pub fn main() {
     let address = std::env::args().nth(1).unwrap_or("127.0.0.1".to_owned());
