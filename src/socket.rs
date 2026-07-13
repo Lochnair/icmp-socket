@@ -23,9 +23,9 @@ use std::{
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-use crate::packet::{Icmpv4Packet, Icmpv6Packet};
+use crate::packet::{Icmpv4Packet, Icmpv6Packet, WithEchoRequest};
 
-fn ip_to_socket(ip: &IpAddr) -> SocketAddr {
+pub fn ip_to_socket(ip: &IpAddr) -> SocketAddr {
     SocketAddr::new(*ip, 0)
 }
 
@@ -58,33 +58,33 @@ pub trait IcmpSocket {
 }
 
 /// Options for this socket.
-struct Opts {
-    hops: u32,
-    timeout: Option<Duration>,
+pub struct Opts {
+    pub hops: u32,
+    pub timeout: Option<Duration>,
 }
 
-/// An ICMPv4 socket.
-pub struct IcmpSocket4 {
+/// Default size of the per-read receive buffer. Sized with headroom over a
+/// typical Ethernet MTU so an ordinary reply never fills the buffer exactly
+/// (which would be reported as a possible truncation). Larger replies need a
+/// bigger buffer via `set_read_buffer_size`.
+const DEFAULT_RECV_BUFFER_SIZE: usize = 2048;
+
+/// Shared low-level state and operations for the ICMPv4 sockets. This keeps the
+/// public socket types thin: the raw and datagram sockets differ only in how a
+/// packet is sent, not in binding, receiving, or option handling.
+struct Icmp4Core {
+    inner: Socket,
     bound_to: Option<Ipv4Addr>,
     buf: Vec<u8>,
-    inner: Socket,
     opts: Opts,
 }
 
-impl IcmpSocket4 {
-    /// Construct a new raw socket. The socket must be bound to an address using `bind_to`
-    /// before it can be used to send and receive packets.
-    pub fn new() -> std::io::Result<Self> {
-        let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?;
-        Self::new_from_socket(socket)
-    }
-
-    fn new_from_socket(socket: Socket) -> std::io::Result<Self> {
-        socket.set_recv_buffer_size(512)?;
+impl Icmp4Core {
+    fn from_socket(inner: Socket) -> std::io::Result<Self> {
         Ok(Self {
+            inner,
             bound_to: None,
-            inner: socket,
-            buf: Vec::with_capacity(512),
+            buf: vec![0; DEFAULT_RECV_BUFFER_SIZE],
             opts: Opts {
                 hops: 50,
                 timeout: None,
@@ -92,11 +92,95 @@ impl IcmpSocket4 {
         })
     }
 
-    /// Construct a new dgram socket. The socket must be bound to an address using `bind_to`
+    fn bind(&mut self, addr: Ipv4Addr) -> std::io::Result<()> {
+        self.bound_to = Some(addr);
+        let sock = ip_to_socket(&IpAddr::V4(addr));
+        self.inner.bind(&(sock.into()))
+    }
+
+    fn set_read_buffer_size(&mut self, size: usize) {
+        self.buf.resize(size, 0);
+    }
+
+    /// The bound local port. On a datagram (ping) socket this is the ICMP
+    /// identifier the kernel associates with the socket.
+    fn local_identifier(&self) -> std::io::Result<u16> {
+        let addr = self.inner.local_addr()?;
+        Ok(addr.as_socket_ipv4().map(|s| s.port()).unwrap_or(0))
+    }
+
+    fn send_bytes(&self, dest: Ipv4Addr, bytes: &[u8]) -> std::io::Result<()> {
+        self.inner.set_ttl_v4(self.opts.hops)?;
+        let dest = ip_to_socket(&IpAddr::V4(dest));
+        self.inner.send_to(bytes, &(dest.into()))?;
+        Ok(())
+    }
+
+    fn recv(&mut self) -> std::io::Result<(Icmpv4Packet, SockAddr)> {
+        self.inner.set_read_timeout(self.opts.timeout)?;
+        self.buf.clear();
+        let (read_count, addr) = self.inner.recv_from(self.buf.spare_capacity_mut())?;
+
+        if read_count == self.buf.capacity() {
+            return Err(truncated_error());
+        }
+
+        unsafe {
+            self.buf.set_len(read_count);
+        }
+
+        let packet = Icmpv4Packet::parse_auto(&self.buf[0..read_count])?;
+        Ok((packet, addr))
+    }
+}
+
+/// The error returned when a received packet filled the read buffer and may
+/// therefore have been truncated.
+pub(crate) fn truncated_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "received packet filled the read buffer and may be truncated; \
+         increase it with set_read_buffer_size",
+    )
+}
+
+/// A raw (SOCK_RAW) ICMPv4 socket. Requires elevated privileges. The caller
+/// constructs and owns the full packet, including its identifier.
+pub struct IcmpSocket4 {
+    core: Icmp4Core,
+}
+
+impl IcmpSocket4 {
+    /// Construct a new raw socket. The socket must be bound to an address using `bind`
     /// before it can be used to send and receive packets.
-    pub fn new_dgram_socket() -> std::io::Result<Self> {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4))?;
-        Self::new_from_socket(socket)
+    pub fn new() -> std::io::Result<Self> {
+        let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?;
+        Ok(Self {
+            core: Icmp4Core::from_socket(socket)?,
+        })
+    }
+
+    /// The address this socket has been bound to, if any.
+    pub fn bound_to(&self) -> Option<Ipv4Addr> {
+        self.core.bound_to
+    }
+
+    /// Set the size of the per-read receive buffer (default 2048 bytes). A
+    /// packet larger than this is truncated on read, and `rcv_from` reports a
+    /// possible truncation rather than returning a partial packet.
+    pub fn set_read_buffer_size(&mut self, size: usize) {
+        self.core.set_read_buffer_size(size);
+    }
+
+    #[cfg(feature = "smol")]
+    pub fn into_async(self) -> std::io::Result<crate::smol::AsyncIcmpV4Socket> {
+        let Icmp4Core {
+            inner,
+            bound_to,
+            buf,
+            opts,
+        } = self.core;
+        crate::smol::AsyncIcmpV4Socket::new(inner, bound_to, buf, opts)
     }
 }
 
@@ -105,42 +189,120 @@ impl IcmpSocket for IcmpSocket4 {
     type PacketType = Icmpv4Packet;
 
     fn set_max_hops(&mut self, hops: u32) {
-        self.opts.hops = hops;
+        self.core.opts.hops = hops;
     }
 
     fn bind<A: Into<Self::AddrType>>(&mut self, addr: A) -> std::io::Result<()> {
-        let addr = addr.into();
-        self.bound_to = Some(addr.clone());
-        let sock = ip_to_socket(&IpAddr::V4(addr));
-        self.inner.bind(&(sock.into()))?;
-        Ok(())
+        self.core.bind(addr.into())
     }
 
     fn send_to(&mut self, dest: Self::AddrType, packet: Self::PacketType) -> std::io::Result<()> {
-        let dest = ip_to_socket(&IpAddr::V4(dest));
-        self.inner.set_ttl_v4(self.opts.hops)?;
-        self.inner
-            .send_to(&packet.with_checksum().get_bytes(true), &(dest.into()))?;
-        Ok(())
+        self.core
+            .send_bytes(dest, &packet.with_checksum().get_bytes(true))
     }
 
     fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
-        self.inner.set_read_timeout(self.opts.timeout)?;
-        self.buf.clear();
-        let (read_count, addr) = self.inner.recv_from(self.buf.spare_capacity_mut())?;
-        unsafe {
-            self.buf.set_len(read_count);
-        }
-        Ok((self.buf[..].try_into()?, addr))
+        self.core.recv()
     }
 
     fn set_timeout(&mut self, timeout: Option<Duration>) {
-        self.opts.timeout = timeout;
+        self.core.opts.timeout = timeout;
     }
 
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()> {
         self.inner.bind_device(Some(interface_name.as_bytes()))
+    }
+}
+
+/// A datagram (SOCK_DGRAM) ICMPv4 "ping" socket. Usable without elevated
+/// privileges where the OS permits it (macOS, and Linux when
+/// `net.ipv4.ping_group_range` includes the running user's gid).
+///
+/// Unlike the raw socket, the identifier is not the caller's to choose: on
+/// Linux the kernel overwrites the packet's identifier with the socket's local
+/// port. This type therefore owns the identifier — derived from the bound port
+/// and reported by [`Self::identifier`] — and its [`Self::send`] takes only the
+/// sequence and payload. Match replies against [`Self::identifier`].
+pub struct DgramIcmpSocket4 {
+    core: Icmp4Core,
+    identifier: u16,
+}
+
+impl DgramIcmpSocket4 {
+    /// Construct a new datagram socket. It must be bound with [`Self::bind`]
+    /// before sending so that its identifier is established.
+    pub fn new() -> std::io::Result<Self> {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4))?;
+        Ok(Self {
+            core: Icmp4Core::from_socket(socket)?,
+            identifier: 0,
+        })
+    }
+
+    /// Bind the socket and establish its identifier from the assigned local
+    /// port.
+    pub fn bind<A: Into<Ipv4Addr>>(&mut self, addr: A) -> std::io::Result<()> {
+        self.core.bind(addr.into())?;
+        self.identifier = self.core.local_identifier()?;
+        Ok(())
+    }
+
+    /// The address this socket has been bound to, if any.
+    pub fn bound_to(&self) -> Option<Ipv4Addr> {
+        self.core.bound_to
+    }
+
+    /// Set the size of the per-read receive buffer (default 2048 bytes). A
+    /// packet larger than this is truncated on read, and `rcv_from` reports a
+    /// possible truncation rather than returning a partial packet.
+    pub fn set_read_buffer_size(&mut self, size: usize) {
+        self.core.set_read_buffer_size(size);
+    }
+
+    /// The ICMP identifier this socket uses on the wire. Use it to match replies
+    /// that belong to this socket. Meaningful only after [`Self::bind`].
+    ///
+    /// This is the bound local port. On Linux that is a unique kernel-assigned
+    /// value; on macOS a datagram ICMP socket is not assigned a port, so this
+    /// is `0` and is not unique across sockets.
+    pub fn identifier(&self) -> u16 {
+        self.identifier
+    }
+
+    /// Sets the ttl for packets sent on this socket.
+    pub fn set_max_hops(&mut self, hops: u32) {
+        self.core.opts.hops = hops;
+    }
+
+    /// Sets the timeout on the socket for `rcv_from`. A value of None blocks.
+    pub fn set_timeout(&mut self, timeout: Option<Duration>) {
+        self.core.opts.timeout = timeout;
+    }
+
+    /// Send an echo request to `dest`. The identifier is supplied by the socket,
+    /// so the caller provides only the sequence number and payload.
+    pub fn send(&mut self, dest: Ipv4Addr, sequence: u16, payload: Vec<u8>) -> std::io::Result<()> {
+        let packet = Icmpv4Packet::with_echo_request(self.identifier, sequence, payload)?;
+        self.core
+            .send_bytes(dest, &packet.with_checksum().get_bytes(true))
+    }
+
+    /// Receive a packet. Replies are not filtered; compare against
+    /// [`Self::identifier`] to select those belonging to this socket.
+    pub fn rcv_from(&mut self) -> std::io::Result<(Icmpv4Packet, SockAddr)> {
+        self.core.recv()
+    }
+
+    #[cfg(feature = "smol")]
+    pub fn into_async(self) -> std::io::Result<crate::smol::AsyncDgramIcmpV4Socket> {
+        let Icmp4Core {
+            inner,
+            bound_to,
+            buf,
+            opts,
+        } = self.core;
+        crate::smol::AsyncDgramIcmpV4Socket::new(inner, bound_to, buf, opts, self.identifier)
     }
 }
 
@@ -161,11 +323,10 @@ impl IcmpSocket6 {
     }
 
     fn new_from_socket(socket: Socket) -> std::io::Result<Self> {
-        socket.set_recv_buffer_size(512)?;
         Ok(Self {
             bound_to: None,
             inner: socket,
-            buf: Vec::with_capacity(512),
+            buf: vec![0; DEFAULT_RECV_BUFFER_SIZE],
             opts: Opts {
                 hops: 50,
                 timeout: None,
@@ -173,11 +334,11 @@ impl IcmpSocket6 {
         })
     }
 
-    /// Construct a new dgram socket. The socket must be bound to an address using `bind_to`
-    /// before it can be used to send and receive packets.
-    pub fn new_dgram_socket() -> std::io::Result<Self> {
-        let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::ICMPV6))?;
-        Self::new_from_socket(socket)
+    /// Set the size of the per-read receive buffer (default 2048 bytes). A
+    /// packet larger than this is truncated on read, and `rcv_from` reports a
+    /// possible truncation rather than returning a partial packet.
+    pub fn set_read_buffer_size(&mut self, size: usize) {
+        self.buf.resize(size, 0);
     }
 }
 
