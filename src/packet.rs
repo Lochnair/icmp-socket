@@ -22,7 +22,7 @@
 //!
 //! Constructing an ICMPv4 echo request.
 //! ```
-//! # use icmp_socket::packet::*;
+//! # use icmp_socket2::packet::*;
 //! let packet = Icmpv4Packet::with_echo_request(
 //!     42, // An identifier so you can recognize responses to your own packets.
 //!     0, // the first echo request packet in our sequence.
@@ -32,7 +32,7 @@
 //!
 //! Parsing an ICMPv4 packet from a byte buffer.
 //! ```
-//! # use icmp_socket::packet::*;
+//! # use icmp_socket2::packet::*;
 //! use std::convert::TryFrom;
 //! # let packet = Icmpv4Packet::with_echo_request(
 //! #     42, // An identifier so you can recognize responses to your own packets.
@@ -276,7 +276,7 @@ impl Icmpv6Packet {
             return Err(PacketParseError::PacketTooSmall(bytes.len()));
         }
         let (typ, code, checksum) = (bytes[0], bytes[1], u16_from_be(&bytes[2..4]));
-        
+
         let next_field = u32_from_be(&bytes[4..8]);
         let payload = bytes[8..].to_owned();
         let message = match typ {
