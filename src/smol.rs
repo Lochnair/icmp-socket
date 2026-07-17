@@ -69,6 +69,7 @@ impl AsyncIcmp4Core {
 
     fn set_read_buffer_size(&mut self, size: usize) {
         self.buf.resize(size, 0);
+        self.buf.shrink_to_fit();
     }
 
     async fn send_bytes(&self, dest: Ipv4Addr, bytes: &[u8]) -> std::io::Result<()> {

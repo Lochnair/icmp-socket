@@ -100,6 +100,7 @@ impl Icmp4Core {
 
     fn set_read_buffer_size(&mut self, size: usize) {
         self.buf.resize(size, 0);
+        self.buf.shrink_to_fit();
     }
 
     /// The bound local port. On a datagram (ping) socket this is the ICMP
@@ -339,6 +340,7 @@ impl IcmpSocket6 {
     /// possible truncation rather than returning a partial packet.
     pub fn set_read_buffer_size(&mut self, size: usize) {
         self.buf.resize(size, 0);
+        self.buf.shrink_to_fit();
     }
 }
 
