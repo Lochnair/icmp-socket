@@ -15,10 +15,31 @@
 //!
 //! The standard ping examples for both Ipv6 and IPv4 are in the examples
 //! directory.
+//!
+//! The `async-io` feature provides an async-io backend, while `smol` remains a
+//! backwards-compatible alias for it. The `tokio` feature provides a
+//! first-class Tokio backend for ICMPv4 sockets on Unix.
 pub mod packet;
 pub mod socket;
 
 pub use packet::{Icmpv4Message, Icmpv4Packet, Icmpv6Message, Icmpv6Packet};
 pub use socket::{DgramIcmpSocket4, IcmpSocket, IcmpSocket4, IcmpSocket6};
+
+#[cfg(any(feature = "async-io", feature = "tokio"))]
+pub mod async_api;
+#[cfg(any(feature = "async-io", all(feature = "tokio", unix)))]
+mod async_common;
+#[cfg(any(feature = "async-io", feature = "tokio"))]
+pub use async_api::AsyncIcmpSocket;
+
+#[cfg(feature = "async-io")]
+pub mod async_io;
+
 #[cfg(feature = "smol")]
-pub mod smol;
+pub mod smol {
+    //! Backwards-compatible names for the [`crate::async_io`] backend.
+    pub use crate::async_io::*;
+}
+
+#[cfg(all(feature = "tokio", unix))]
+pub mod tokio;

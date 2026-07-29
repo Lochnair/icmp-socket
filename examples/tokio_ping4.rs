@@ -11,19 +11,17 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//! Async ICMPv4 ping example using the `async-io` backend.
-//!
-//! This uses an unprivileged datagram (SOCK_DGRAM) socket so it can run
-//! without root on platforms that allow it (macOS, and Linux when
-//! `net.ipv4.ping_group_range` is configured). To use a raw socket instead,
-//! swap `new_dgram_socket()` for `new()` and run with elevated privileges.
+//! Async ICMPv4 ping example using the Unix Tokio backend.
+#[cfg(unix)]
 use std::{
     net::Ipv4Addr,
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
 use icmp_socket2::*;
 
+#[cfg(unix)]
 fn main() -> std::io::Result<()> {
     let address = std::env::args()
         .nth(1)
@@ -31,16 +29,14 @@ fn main() -> std::io::Result<()> {
     let parsed_addr = address
         .parse::<Ipv4Addr>()
         .expect("argument must be an IPv4 address");
+    let runtime = ::tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
 
-    ::async_io::block_on(async move {
-        // A datagram socket owns its identifier, so we only supply the
-        // sequence and payload to `send`. Use `IcmpSocket4::new()` for a raw
-        // socket (requires privileges), whose send takes a full packet.
-        let socket = DgramIcmpSocket4::new()?;
-        #[cfg(feature = "smol")]
-        let mut socket = socket.into_async()?;
-        #[cfg(not(feature = "smol"))]
-        let mut socket = socket.into_async_io()?;
+    runtime.block_on(async move {
+        // `into_tokio` is deliberately called inside the entered runtime
+        // context because AsyncFd registration requires it.
+        let mut socket = DgramIcmpSocket4::new()?.into_tokio()?;
         socket.bind(Ipv4Addr::new(0, 0, 0, 0)).await?;
         socket.set_timeout(Some(Duration::from_secs(1)));
 
@@ -61,7 +57,6 @@ fn main() -> std::io::Result<()> {
                 )
                 .await?;
 
-            // Read replies until we see our own destination or time out.
             loop {
                 match socket.rcv_from().await {
                     Ok((resp, sock_addr)) => {
@@ -93,14 +88,19 @@ fn main() -> std::io::Result<()> {
                             break;
                         }
                     }
-                    Err(e) => {
-                        eprintln!("{:?}", e);
+                    Err(error) => {
+                        eprintln!("{error:?}");
                         break;
                     }
                 }
             }
-            ::async_io::Timer::after(Duration::from_secs(1)).await;
+            ::tokio::time::sleep(Duration::from_secs(1)).await;
             sequence = sequence.wrapping_add(1);
         }
     })
+}
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("the Tokio ICMP backend is currently available only on Unix");
 }

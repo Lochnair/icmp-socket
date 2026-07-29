@@ -133,6 +133,24 @@ impl Icmp4Core {
         let packet = Icmpv4Packet::parse_auto(&self.buf[0..read_count])?;
         Ok((packet, addr))
     }
+
+    #[cfg(any(feature = "async-io", all(feature = "tokio", unix)))]
+    fn into_parts(self) -> Icmp4Parts {
+        Icmp4Parts {
+            inner: self.inner,
+            bound_to: self.bound_to,
+            buf: self.buf,
+            opts: self.opts,
+        }
+    }
+}
+
+#[cfg(any(feature = "async-io", all(feature = "tokio", unix)))]
+struct Icmp4Parts {
+    inner: Socket,
+    bound_to: Option<Ipv4Addr>,
+    buf: Vec<u8>,
+    opts: Opts,
 }
 
 /// The error returned when a received packet filled the read buffer and may
@@ -173,15 +191,36 @@ impl IcmpSocket4 {
         self.core.set_read_buffer_size(size);
     }
 
-    #[cfg(feature = "smol")]
-    pub fn into_async(self) -> std::io::Result<crate::smol::AsyncIcmpV4Socket> {
-        let Icmp4Core {
+    /// Convert this socket to the `async-io` backend.
+    #[cfg(feature = "async-io")]
+    pub fn into_async_io(self) -> std::io::Result<crate::async_io::AsyncIcmpV4Socket> {
+        let Icmp4Parts {
             inner,
             bound_to,
             buf,
             opts,
-        } = self.core;
-        crate::smol::AsyncIcmpV4Socket::new(inner, bound_to, buf, opts)
+        } = self.core.into_parts();
+        crate::async_io::AsyncIcmpV4Socket::new(inner, bound_to, buf, opts)
+    }
+
+    /// Convert this socket to the Tokio backend.
+    ///
+    /// This must be called from within an entered Tokio runtime context.
+    #[cfg(all(feature = "tokio", unix))]
+    pub fn into_tokio(self) -> std::io::Result<crate::tokio::AsyncIcmpV4Socket> {
+        let Icmp4Parts {
+            inner,
+            bound_to,
+            buf,
+            opts,
+        } = self.core.into_parts();
+        crate::tokio::AsyncIcmpV4Socket::new(inner, bound_to, buf, opts)
+    }
+
+    /// Convert this socket to the backwards-compatible `smol` async API.
+    #[cfg(feature = "smol")]
+    pub fn into_async(self) -> std::io::Result<crate::smol::AsyncIcmpV4Socket> {
+        self.into_async_io()
     }
 }
 
@@ -295,15 +334,36 @@ impl DgramIcmpSocket4 {
         self.core.recv()
     }
 
-    #[cfg(feature = "smol")]
-    pub fn into_async(self) -> std::io::Result<crate::smol::AsyncDgramIcmpV4Socket> {
-        let Icmp4Core {
+    /// Convert this socket to the `async-io` backend.
+    #[cfg(feature = "async-io")]
+    pub fn into_async_io(self) -> std::io::Result<crate::async_io::AsyncDgramIcmpV4Socket> {
+        let Icmp4Parts {
             inner,
             bound_to,
             buf,
             opts,
-        } = self.core;
-        crate::smol::AsyncDgramIcmpV4Socket::new(inner, bound_to, buf, opts, self.identifier)
+        } = self.core.into_parts();
+        crate::async_io::AsyncDgramIcmpV4Socket::new(inner, bound_to, buf, opts, self.identifier)
+    }
+
+    /// Convert this socket to the Tokio backend.
+    ///
+    /// This must be called from within an entered Tokio runtime context.
+    #[cfg(all(feature = "tokio", unix))]
+    pub fn into_tokio(self) -> std::io::Result<crate::tokio::AsyncDgramIcmpV4Socket> {
+        let Icmp4Parts {
+            inner,
+            bound_to,
+            buf,
+            opts,
+        } = self.core.into_parts();
+        crate::tokio::AsyncDgramIcmpV4Socket::new(inner, bound_to, buf, opts, self.identifier)
+    }
+
+    /// Convert this socket to the backwards-compatible `smol` async API.
+    #[cfg(feature = "smol")]
+    pub fn into_async(self) -> std::io::Result<crate::smol::AsyncDgramIcmpV4Socket> {
+        self.into_async_io()
     }
 }
 
