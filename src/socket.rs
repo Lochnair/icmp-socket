@@ -55,6 +55,14 @@ pub trait IcmpSocket {
 
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()>;
+
+    /// Sets the packet mark used for mark-based routing or filtering.
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    fn set_mark(&mut self, mark: u32) -> std::io::Result<()>;
+
+    /// Binds this socket to a FreeBSD forwarding information base (FIB).
+    #[cfg(target_os = "freebsd")]
+    fn set_fib(&mut self, fib: u32) -> std::io::Result<()>;
 }
 
 /// Options for this socket.
@@ -253,6 +261,16 @@ impl IcmpSocket for IcmpSocket4 {
     fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()> {
         self.core.inner.bind_device(Some(interface_name.as_bytes()))
     }
+
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    fn set_mark(&mut self, mark: u32) -> std::io::Result<()> {
+        self.core.inner.set_mark(mark)
+    }
+
+    #[cfg(target_os = "freebsd")]
+    fn set_fib(&mut self, fib: u32) -> std::io::Result<()> {
+        self.core.inner.set_fib(fib)
+    }
 }
 
 /// A datagram (SOCK_DGRAM) ICMPv4 "ping" socket. Usable without elevated
@@ -308,6 +326,24 @@ impl DgramIcmpSocket4 {
     /// is `0` and is not unique across sockets.
     pub fn identifier(&self) -> u16 {
         self.identifier
+    }
+
+    /// Binds this socket to a network interface.
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    pub fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()> {
+        self.core.inner.bind_device(Some(interface_name.as_bytes()))
+    }
+
+    /// Sets the packet mark used for mark-based routing or filtering.
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    pub fn set_mark(&mut self, mark: u32) -> std::io::Result<()> {
+        self.core.inner.set_mark(mark)
+    }
+
+    /// Binds this socket to a FreeBSD forwarding information base (FIB).
+    #[cfg(target_os = "freebsd")]
+    pub fn set_fib(&mut self, fib: u32) -> std::io::Result<()> {
+        self.core.inner.set_fib(fib)
     }
 
     /// Sets the ttl for packets sent on this socket.
@@ -459,6 +495,16 @@ impl IcmpSocket for IcmpSocket6 {
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()> {
         self.inner.bind_device(Some(interface_name.as_bytes()))
+    }
+
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    fn set_mark(&mut self, mark: u32) -> std::io::Result<()> {
+        self.inner.set_mark(mark)
+    }
+
+    #[cfg(target_os = "freebsd")]
+    fn set_fib(&mut self, fib: u32) -> std::io::Result<()> {
+        self.inner.set_fib(fib)
     }
 }
 
