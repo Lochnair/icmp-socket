@@ -259,11 +259,13 @@ pub struct Icmpv6Packet {
 }
 
 /// Error type returned by parsing the ICMP packets.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PacketParseError {
     /// Not enough bytes to properly parse the packet from.
+    #[error("Packet Too Small size: {0}")]
     PacketTooSmall(usize),
     /// An unrecognized ICMP type.
+    #[error("UnrecognizedIcmpType({0})")]
     UnrecognizedICMPType(u8),
 }
 
@@ -502,47 +504,22 @@ impl TryFrom<&[u8]> for Icmpv6Packet {
 }
 
 /// Errors returned by constructors for a given packet.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, thiserror::Error)]
 pub enum IcmpPacketBuildError {
     /// The code passed in for the payload was invalid for the message type.
+    #[error("Invalid Code: {0}")]
     InvalidCode(u8),
-}
-use IcmpPacketBuildError::InvalidCode;
-
-impl std::fmt::Display for IcmpPacketBuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                InvalidCode(c) => format!("Invalid Code: {}", c),
-            }
-        )
-    }
-}
-
-impl std::fmt::Display for PacketParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                PacketParseError::PacketTooSmall(c) => format!("Packet Too Small size: {}", c),
-                PacketParseError::UnrecognizedICMPType(t) => format!("UnrecognizedIcmpType({})", t),
-            }
-        )
-    }
 }
 
 impl From<IcmpPacketBuildError> for std::io::Error {
     fn from(err: IcmpPacketBuildError) -> Self {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("{}", err))
+        std::io::Error::other(err)
     }
 }
 
 impl From<PacketParseError> for std::io::Error {
     fn from(err: PacketParseError) -> Self {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("{}", err))
+        std::io::Error::other(err)
     }
 }
 
