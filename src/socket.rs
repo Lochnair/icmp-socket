@@ -100,10 +100,30 @@ impl Icmp4Core {
         })
     }
 
+    fn try_clone(&self) -> std::io::Result<Self> {
+        if self.bound_to.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Socket must be bound before it can be cloned",
+            ));
+        }
+
+        Ok(Self {
+            inner: self.inner.try_clone()?,
+            bound_to: self.bound_to,
+            buf: vec![0; self.buf.capacity()],
+            opts: Opts {
+                hops: self.opts.hops,
+                timeout: self.opts.timeout,
+            },
+        })
+    }
+
     fn bind(&mut self, addr: Ipv4Addr) -> std::io::Result<()> {
-        self.bound_to = Some(addr);
         let sock = ip_to_socket(&IpAddr::V4(addr));
-        self.inner.bind(&(sock.into()))
+        self.inner.bind(&(sock.into()))?;
+        self.bound_to = Some(addr);
+        Ok(())
     }
 
     fn set_read_buffer_size(&mut self, size: usize) {
@@ -184,6 +204,18 @@ impl IcmpSocket4 {
         let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?;
         Ok(Self {
             core: Icmp4Core::from_socket(socket)?,
+        })
+    }
+
+    /// Try to clone this socket, including its wrapper state.
+    ///
+    /// The socket must be bound first. The clone shares the underlying OS
+    /// socket, so socket-level settings are shared. On Unix, converting a
+    /// clone to an async socket also changes the nonblocking mode seen by all
+    /// clones.
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(Self {
+            core: self.core.try_clone()?,
         })
     }
 
@@ -295,6 +327,19 @@ impl DgramIcmpSocket4 {
         Ok(Self {
             core: Icmp4Core::from_socket(socket)?,
             identifier: 0,
+        })
+    }
+
+    /// Try to clone this socket, including its wrapper state.
+    ///
+    /// The socket must be bound first. The clone shares the underlying OS
+    /// socket, so socket-level settings are shared. On Unix, converting a
+    /// clone to an async socket also changes the nonblocking mode seen by all
+    /// clones.
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(Self {
+            core: self.core.try_clone()?,
+            identifier: self.identifier,
         })
     }
 
@@ -419,6 +464,31 @@ impl IcmpSocket6 {
         Self::new_from_socket(socket)
     }
 
+    /// Try to clone this socket, including its wrapper state.
+    ///
+    /// The socket must be bound first. The clone shares the underlying OS
+    /// socket, so socket-level settings are shared. On Unix, converting a
+    /// clone to an async socket also changes the nonblocking mode seen by all
+    /// clones.
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        if self.bound_to.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Socket must be bound before it can be cloned",
+            ));
+        }
+
+        Ok(Self {
+            bound_to: self.bound_to,
+            inner: self.inner.try_clone()?,
+            buf: vec![0; self.buf.capacity()],
+            opts: Opts {
+                hops: self.opts.hops,
+                timeout: self.opts.timeout,
+            },
+        })
+    }
+
     fn new_from_socket(socket: Socket) -> std::io::Result<Self> {
         Ok(Self {
             bound_to: None,
@@ -450,9 +520,9 @@ impl IcmpSocket for IcmpSocket6 {
 
     fn bind<A: Into<Self::AddrType>>(&mut self, addr: A) -> std::io::Result<()> {
         let addr = addr.into();
-        self.bound_to = Some(addr.clone());
         let sock = ip_to_socket(&IpAddr::V6(addr));
         self.inner.bind(&(sock.into()))?;
+        self.bound_to = Some(addr);
         Ok(())
     }
 
