@@ -74,15 +74,13 @@ pub fn main() {
             .unwrap();
         socket6.set_timeout(Some(Duration::from_secs(1)));
         loop {
-            let received = match socket6.rcv_from() {
+            let (resp, sock_addr) = match socket6.rcv_from() {
                 Ok(tpl) => tpl,
                 Err(e) => {
                     eprintln!("{:?}", e);
                     break;
                 }
             };
-            let resp = received.packet;
-            let sock_addr = received.peer;
             if packet_handler(resp, send_time, *sock_addr.as_socket_ipv6().unwrap().ip()).is_some()
             {
                 std::thread::sleep(Duration::from_millis(1000));

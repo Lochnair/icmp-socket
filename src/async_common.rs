@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(test)]
 use std::mem::MaybeUninit;
 use std::{
     io,
@@ -80,7 +79,6 @@ impl AsyncIcmp4State {
         Ok(ip_to_socket(&IpAddr::V4(dest)).into())
     }
 
-    #[cfg(test)]
     pub(crate) fn begin_receive(&mut self) -> &mut [MaybeUninit<u8>] {
         self.buf.clear();
         self.buf.spare_capacity_mut()
@@ -98,10 +96,11 @@ impl AsyncIcmp4State {
         Ok(Icmpv4Packet::parse_auto(&self.buf[0..read_count])?)
     }
 
-    pub(crate) fn receive(
+    pub(crate) fn receive_with_meta(
         &mut self,
         socket: &Socket,
     ) -> io::Result<IcmpReceiveResult<Icmpv4Packet>> {
+        receive::configure(socket)?;
         let received = receive::receive(socket, &mut self.buf)?;
         self.finish_received(received)
     }

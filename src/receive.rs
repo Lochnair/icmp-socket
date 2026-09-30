@@ -37,8 +37,8 @@ mod linux {
     #[repr(align(8))]
     struct ControlBuffer([u8; CONTROL_LEN]);
 
-    pub(super) fn configure(socket: &Socket) {
-        let _ = setsockopt(socket, sockopt::Timestamping, &RX_TIMESTAMPING_FLAGS);
+    pub(super) fn configure(socket: &Socket) -> io::Result<()> {
+        setsockopt(socket, sockopt::Timestamping, &RX_TIMESTAMPING_FLAGS).map_err(Into::into)
     }
 
     pub(super) fn receive(socket: &Socket, buffer: &mut Vec<u8>) -> io::Result<ReceivedBytes> {
@@ -115,7 +115,9 @@ mod other {
 
     use super::ReceivedBytes;
 
-    pub(super) fn configure(_: &Socket) {}
+    pub(super) fn configure(_: &Socket) -> io::Result<()> {
+        Ok(())
+    }
 
     pub(super) fn receive(socket: &Socket, buffer: &mut Vec<u8>) -> io::Result<ReceivedBytes> {
         buffer.clear();
@@ -140,8 +142,8 @@ use linux as platform;
 #[cfg(not(target_os = "linux"))]
 use other as platform;
 
-pub(crate) fn configure(socket: &Socket) {
-    platform::configure(socket);
+pub(crate) fn configure(socket: &Socket) -> io::Result<()> {
+    platform::configure(socket)
 }
 
 pub(crate) fn receive(socket: &Socket, buffer: &mut Vec<u8>) -> io::Result<ReceivedBytes> {

@@ -23,7 +23,7 @@ use std::{net::Ipv4Addr, time::Duration};
 use ::async_io::{Async, Timer};
 use async_trait::async_trait;
 use futures_lite::future::FutureExt;
-use socket2::Socket;
+use socket2::{SockAddr, Socket};
 
 pub use crate::async_api::AsyncIcmpSocket;
 use crate::{
@@ -66,10 +66,27 @@ impl AsyncIcmp4Core {
         Ok(())
     }
 
-    async fn recv(&mut self) -> std::io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
+    async fn recv(&mut self) -> std::io::Result<(Icmpv4Packet, SockAddr)> {
         let timeout = self.state.timeout();
         let inner = &self.inner;
-        let recv = inner.read_with(|socket| self.state.receive(socket));
+        let recv = inner.read_with(|socket| socket.recv_from(self.state.begin_receive()));
+        let (read_count, peer) = match timeout {
+            Some(duration) => {
+                recv.or(async move {
+                    Timer::after(duration).await;
+                    Err(timeout_error())
+                })
+                .await?
+            }
+            None => recv.await?,
+        };
+        Ok((self.state.finish_receive(read_count)?, peer))
+    }
+
+    async fn recv_with_meta(&mut self) -> std::io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
+        let timeout = self.state.timeout();
+        let inner = &self.inner;
+        let recv = inner.read_with(|socket| self.state.receive_with_meta(socket));
         match timeout {
             Some(duration) => {
                 recv.or(async move {
@@ -112,6 +129,13 @@ impl AsyncIcmpV4Socket {
     pub fn set_read_buffer_size(&mut self, size: usize) {
         self.core.state.set_read_buffer_size(size);
     }
+
+    /// Receive a packet together with userspace and optional kernel timing metadata.
+    pub async fn rcv_from_with_meta(
+        &mut self,
+    ) -> std::io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
+        self.core.recv_with_meta().await
+    }
 }
 
 #[async_trait]
@@ -139,7 +163,7 @@ impl AsyncIcmpSocket for AsyncIcmpV4Socket {
         self.core.send_bytes(dest, &raw_packet_bytes(packet)).await
     }
 
-    async fn rcv_from(&mut self) -> std::io::Result<crate::IcmpReceiveResult<Self::PacketType>> {
+    async fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
         self.core.recv().await
     }
 }
@@ -211,7 +235,14 @@ impl AsyncDgramIcmpV4Socket {
     }
 
     /// Receive a packet without filtering replies.
-    pub async fn rcv_from(&mut self) -> std::io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
+    pub async fn rcv_from(&mut self) -> std::io::Result<(Icmpv4Packet, SockAddr)> {
         self.core.recv().await
+    }
+
+    /// Receive a packet together with userspace and optional kernel timing metadata.
+    pub async fn rcv_from_with_meta(
+        &mut self,
+    ) -> std::io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
+        self.core.recv_with_meta().await
     }
 }

@@ -59,15 +59,15 @@ fn main() -> std::io::Result<()> {
 
             loop {
                 match socket.rcv_from().await {
-                    Ok(received) => {
-                        let addr = match received.peer.as_socket_ipv4() {
+                    Ok((resp, sock_addr)) => {
+                        let addr = match sock_addr.as_socket_ipv4() {
                             Some(a) => *a.ip(),
                             None => continue,
                         };
                         if addr != parsed_addr {
                             continue;
                         }
-                        if !received.packet.verify_checksum() {
+                        if !resp.verify_checksum() {
                             eprintln!("Discarding packet with invalid checksum");
                             continue;
                         }
@@ -75,7 +75,7 @@ fn main() -> std::io::Result<()> {
                             sequence: seq,
                             payload,
                             ..
-                        } = received.packet.message
+                        } = resp.message
                         {
                             let elapsed = Instant::now() - send_time;
                             println!(
