@@ -74,6 +74,9 @@ fn dgram_loopback_roundtrip_with_meta() {
     let Some(mut socket) = open_socket() else {
         return;
     };
+    socket
+        .enable_receive_metadata()
+        .expect("failed to enable receive metadata");
     if let Err(error) = socket.send(LOCALHOST, 2, vec![0x20; 16]) {
         eprintln!("skipping ICMP loopback test: could not send ping: {error}");
         return;
@@ -106,6 +109,9 @@ fn async_io_dgram_loopback_roundtrip_with_meta() {
             .into_async_io()
             .expect("failed to create async socket");
         socket
+            .enable_receive_metadata()
+            .expect("failed to enable receive metadata");
+        socket
             .send(LOCALHOST, 3, vec![0x20; 16])
             .await
             .expect("failed to send ping after socket setup");
@@ -134,6 +140,9 @@ fn tokio_dgram_loopback_roundtrip_with_meta() {
             return;
         };
         let mut socket = socket.into_tokio().expect("failed to create Tokio socket");
+        socket
+            .enable_receive_metadata()
+            .expect("failed to enable receive metadata");
         socket
             .send(LOCALHOST, 4, vec![0x20; 16])
             .await
@@ -165,4 +174,15 @@ fn dgram_recv_buffer_truncation() {
         .rcv_from()
         .expect_err("expected a truncation error with an 8 byte buffer");
     assert!(err.to_string().contains("truncat"));
+
+    socket.set_read_buffer_size(2048);
+    socket
+        .send(LOCALHOST, 6, vec![0x20; 32])
+        .expect("failed to send");
+    loop {
+        let (packet, peer) = socket.rcv_from().expect("failed to receive a reply");
+        if is_expected_reply(&packet, &peer, 6) {
+            return;
+        }
+    }
 }

@@ -62,6 +62,10 @@ impl AsyncIcmp4Core {
         AsyncIcmp4State::local_identifier(self.inner.get_ref())
     }
 
+    fn enable_receive_metadata(&self) -> io::Result<()> {
+        crate::receive::configure(self.inner.get_ref())
+    }
+
     async fn send_bytes(&self, dest: Ipv4Addr, bytes: &[u8]) -> io::Result<()> {
         let dest = self.state.prepare_send(self.inner.get_ref(), dest)?;
         self.inner
@@ -132,6 +136,11 @@ impl AsyncIcmpV4Socket {
         &mut self,
     ) -> io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
         self.core.recv_with_meta().await
+    }
+
+    /// Enable receive metadata before traffic can arrive.
+    pub fn enable_receive_metadata(&self) -> io::Result<()> {
+        self.core.enable_receive_metadata()
     }
 }
 
@@ -237,5 +246,10 @@ impl AsyncDgramIcmpV4Socket {
         &mut self,
     ) -> io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
         self.core.recv_with_meta().await
+    }
+
+    /// Enable receive metadata before traffic can arrive.
+    pub fn enable_receive_metadata(&self) -> io::Result<()> {
+        self.core.enable_receive_metadata()
     }
 }

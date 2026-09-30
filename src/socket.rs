@@ -173,7 +173,7 @@ impl Icmp4Core {
 
     fn recv_with_meta(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv4Packet>> {
         self.inner.set_read_timeout(self.opts.timeout)?;
-        receive::configure(&self.inner)?;
+        self.enable_receive_metadata()?;
         let received = receive::receive(&self.inner, &mut self.buf)?;
         if received.truncated {
             return Err(truncated_error());
@@ -185,6 +185,10 @@ impl Icmp4Core {
             received_at: received.received_at,
             kernel_rx_timestamp: received.kernel_rx_timestamp,
         })
+    }
+
+    fn enable_receive_metadata(&self) -> std::io::Result<()> {
+        receive::configure(&self.inner)
     }
 
     #[cfg(any(feature = "async-io", all(feature = "tokio", unix)))]
@@ -262,6 +266,15 @@ impl IcmpSocket4 {
     /// this socket and reads the resulting `SCM_TIMESTAMPING` control message.
     pub fn rcv_from_with_meta(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv4Packet>> {
         self.core.recv_with_meta()
+    }
+
+    /// Enable the socket options used by [`Self::rcv_from_with_meta`].
+    ///
+    /// Call this before traffic can arrive when a Linux kernel receive
+    /// timestamp is required. The metadata receive method also calls this
+    /// automatically, but cannot add a timestamp to a packet already queued.
+    pub fn enable_receive_metadata(&self) -> std::io::Result<()> {
+        self.core.enable_receive_metadata()
     }
 
     /// Convert this socket to the `async-io` backend.
@@ -456,6 +469,15 @@ impl DgramIcmpSocket4 {
         self.core.recv_with_meta()
     }
 
+    /// Enable the socket options used by [`Self::rcv_from_with_meta`].
+    ///
+    /// Call this before traffic can arrive when a Linux kernel receive
+    /// timestamp is required. The metadata receive method also calls this
+    /// automatically, but cannot add a timestamp to a packet already queued.
+    pub fn enable_receive_metadata(&self) -> std::io::Result<()> {
+        self.core.enable_receive_metadata()
+    }
+
     /// Convert this socket to the `async-io` backend.
     #[cfg(feature = "async-io")]
     pub fn into_async_io(self) -> std::io::Result<crate::async_io::AsyncDgramIcmpV4Socket> {
@@ -556,7 +578,7 @@ impl IcmpSocket6 {
     /// this socket and reads the resulting `SCM_TIMESTAMPING` control message.
     pub fn rcv_from_with_meta(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv6Packet>> {
         self.inner.set_read_timeout(self.opts.timeout)?;
-        receive::configure(&self.inner)?;
+        self.enable_receive_metadata()?;
         let received = receive::receive(&self.inner, &mut self.buf)?;
         if received.truncated {
             return Err(truncated_error());
@@ -567,6 +589,15 @@ impl IcmpSocket6 {
             received_at: received.received_at,
             kernel_rx_timestamp: received.kernel_rx_timestamp,
         })
+    }
+
+    /// Enable the socket options used by [`Self::rcv_from_with_meta`].
+    ///
+    /// Call this before traffic can arrive when a Linux kernel receive
+    /// timestamp is required. The metadata receive method also calls this
+    /// automatically, but cannot add a timestamp to a packet already queued.
+    pub fn enable_receive_metadata(&self) -> std::io::Result<()> {
+        receive::configure(&self.inner)
     }
 }
 
