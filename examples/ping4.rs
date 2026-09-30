@@ -76,13 +76,15 @@ pub fn main() {
             .unwrap();
         socket4.set_timeout(Some(Duration::from_secs(1)));
         loop {
-            let (resp, sock_addr) = match socket4.rcv_from() {
+            let received = match socket4.rcv_from() {
                 Ok(tpl) => tpl,
                 Err(e) => {
                     eprintln!("{:?}", e);
                     break;
                 }
             };
+            let resp = received.packet;
+            let sock_addr = received.peer;
             if !resp.verify_checksum() {
                 eprintln!("Discarding packet with invalid checksum");
                 continue;

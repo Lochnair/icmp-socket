@@ -16,8 +16,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use socket2::SockAddr;
-
 /// Common asynchronous operations implemented by each raw ICMP backend.
 ///
 /// The `async-trait` transformation keeps the returned futures `Send` as part
@@ -47,5 +45,5 @@ pub trait AsyncIcmpSocket {
     ) -> std::io::Result<()>;
 
     /// Receives a packet on this socket.
-    async fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)>;
+    async fn rcv_from(&mut self) -> std::io::Result<crate::IcmpReceiveResult<Self::PacketType>>;
 }

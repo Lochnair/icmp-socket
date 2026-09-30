@@ -18,12 +18,27 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::{
     convert::{Into, TryFrom, TryInto},
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::packet::{Icmpv4Packet, Icmpv6Packet, WithEchoRequest};
+use crate::receive;
+
+/// One received ICMP packet and the timing and source metadata captured with it.
+#[derive(Debug)]
+pub struct IcmpReceiveResult<P> {
+    /// The parsed ICMP packet.
+    pub packet: P,
+    /// The peer address reported by the socket.
+    pub peer: SockAddr,
+    /// Monotonic userspace sample taken immediately after the receive syscall.
+    pub received_at: Instant,
+    /// Linux kernel receive time from `SCM_TIMESTAMPING`, when provided.
+    /// This uses the kernel realtime clock and is not an [`Instant`].
+    pub kernel_rx_timestamp: Option<SystemTime>,
+}
 
 pub fn ip_to_socket(ip: &IpAddr) -> SocketAddr {
     SocketAddr::new(*ip, 0)
@@ -51,7 +66,7 @@ pub trait IcmpSocket {
     fn send_to(&mut self, dest: Self::AddrType, packet: Self::PacketType) -> std::io::Result<()>;
 
     /// Receive a packet on this socket.
-    fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)>;
+    fn rcv_from(&mut self) -> std::io::Result<IcmpReceiveResult<Self::PacketType>>;
 
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     fn bind_device(&mut self, interface_name: &str) -> std::io::Result<()>;
@@ -89,6 +104,7 @@ struct Icmp4Core {
 
 impl Icmp4Core {
     fn from_socket(inner: Socket) -> std::io::Result<Self> {
+        receive::configure(&inner);
         Ok(Self {
             inner,
             bound_to: None,
@@ -145,21 +161,19 @@ impl Icmp4Core {
         Ok(())
     }
 
-    fn recv(&mut self) -> std::io::Result<(Icmpv4Packet, SockAddr)> {
+    fn recv(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv4Packet>> {
         self.inner.set_read_timeout(self.opts.timeout)?;
-        self.buf.clear();
-        let (read_count, addr) = self.inner.recv_from(self.buf.spare_capacity_mut())?;
-
-        if read_count == self.buf.capacity() {
+        let received = receive::receive(&self.inner, &mut self.buf)?;
+        if received.truncated {
             return Err(truncated_error());
         }
-
-        unsafe {
-            self.buf.set_len(read_count);
-        }
-
-        let packet = Icmpv4Packet::parse_auto(&self.buf[0..read_count])?;
-        Ok((packet, addr))
+        let packet = Icmpv4Packet::parse_auto(&self.buf[..received.len])?;
+        Ok(IcmpReceiveResult {
+            packet,
+            peer: received.peer,
+            received_at: received.received_at,
+            kernel_rx_timestamp: received.kernel_rx_timestamp,
+        })
     }
 
     #[cfg(any(feature = "async-io", all(feature = "tokio", unix)))]
@@ -281,7 +295,7 @@ impl IcmpSocket for IcmpSocket4 {
             .send_bytes(dest, &packet.with_checksum().get_bytes(true))
     }
 
-    fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
+    fn rcv_from(&mut self) -> std::io::Result<IcmpReceiveResult<Self::PacketType>> {
         self.core.recv()
     }
 
@@ -411,7 +425,7 @@ impl DgramIcmpSocket4 {
 
     /// Receive a packet. Replies are not filtered; compare against
     /// [`Self::identifier`] to select those belonging to this socket.
-    pub fn rcv_from(&mut self) -> std::io::Result<(Icmpv4Packet, SockAddr)> {
+    pub fn rcv_from(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv4Packet>> {
         self.core.recv()
     }
 
@@ -490,6 +504,7 @@ impl IcmpSocket6 {
     }
 
     fn new_from_socket(socket: Socket) -> std::io::Result<Self> {
+        receive::configure(&socket);
         Ok(Self {
             bound_to: None,
             inner: socket,
@@ -548,14 +563,18 @@ impl IcmpSocket for IcmpSocket6 {
         Ok(())
     }
 
-    fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
+    fn rcv_from(&mut self) -> std::io::Result<IcmpReceiveResult<Self::PacketType>> {
         self.inner.set_read_timeout(self.opts.timeout)?;
-        self.buf.clear();
-        let (read_count, addr) = self.inner.recv_from(self.buf.spare_capacity_mut())?;
-        unsafe {
-            self.buf.set_len(read_count);
+        let received = receive::receive(&self.inner, &mut self.buf)?;
+        if received.truncated {
+            return Err(truncated_error());
         }
-        Ok((self.buf[..].try_into()?, addr))
+        Ok(IcmpReceiveResult {
+            packet: self.buf[..received.len].try_into()?,
+            peer: received.peer,
+            received_at: received.received_at,
+            kernel_rx_timestamp: received.kernel_rx_timestamp,
+        })
     }
 
     fn set_timeout(&mut self, timeout: Option<Duration>) {

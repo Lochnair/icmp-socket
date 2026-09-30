@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(test)]
+use std::mem::MaybeUninit;
 use std::{
     io,
-    mem::MaybeUninit,
     net::{IpAddr, Ipv4Addr},
     time::Duration,
 };
@@ -23,7 +24,8 @@ use socket2::{SockAddr, Socket};
 
 use crate::{
     packet::{Icmpv4Packet, WithEchoRequest},
-    socket::{Opts, ip_to_socket, truncated_error},
+    receive::{self, ReceivedBytes},
+    socket::{IcmpReceiveResult, Opts, ip_to_socket, truncated_error},
 };
 
 pub(crate) struct AsyncIcmp4State {
@@ -78,6 +80,7 @@ impl AsyncIcmp4State {
         Ok(ip_to_socket(&IpAddr::V4(dest)).into())
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_receive(&mut self) -> &mut [MaybeUninit<u8>] {
         self.buf.clear();
         self.buf.spare_capacity_mut()
@@ -93,6 +96,30 @@ impl AsyncIcmp4State {
         }
 
         Ok(Icmpv4Packet::parse_auto(&self.buf[0..read_count])?)
+    }
+
+    pub(crate) fn receive(
+        &mut self,
+        socket: &Socket,
+    ) -> io::Result<IcmpReceiveResult<Icmpv4Packet>> {
+        let received = receive::receive(socket, &mut self.buf)?;
+        self.finish_received(received)
+    }
+
+    fn finish_received(
+        &mut self,
+        received: ReceivedBytes,
+    ) -> io::Result<IcmpReceiveResult<Icmpv4Packet>> {
+        if received.truncated {
+            return Err(truncated_error());
+        }
+        let packet = self.finish_receive(received.len)?;
+        Ok(IcmpReceiveResult {
+            packet,
+            peer: received.peer,
+            received_at: received.received_at,
+            kernel_rx_timestamp: received.kernel_rx_timestamp,
+        })
     }
 }
 

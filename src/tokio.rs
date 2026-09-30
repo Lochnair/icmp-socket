@@ -20,7 +20,7 @@
 use std::{io, net::Ipv4Addr, time::Duration};
 
 use async_trait::async_trait;
-use socket2::{SockAddr, Socket};
+use socket2::Socket;
 use tokio::io::{Interest, unix::AsyncFd};
 
 pub use crate::async_api::AsyncIcmpSocket;
@@ -70,19 +70,17 @@ impl AsyncIcmp4Core {
         Ok(())
     }
 
-    async fn recv(&mut self) -> io::Result<(Icmpv4Packet, SockAddr)> {
+    async fn recv(&mut self) -> io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
         let timeout = self.state.timeout();
-        let recv = self.inner.async_io(Interest::READABLE, |socket| {
-            socket.recv_from(self.state.begin_receive())
-        });
-        let (read_count, addr) = match timeout {
+        let recv = self
+            .inner
+            .async_io(Interest::READABLE, |socket| self.state.receive(socket));
+        match timeout {
             Some(duration) => tokio::time::timeout(duration, recv)
                 .await
-                .map_err(|_| timeout_error())??,
-            None => recv.await?,
-        };
-        let packet = self.state.finish_receive(read_count)?;
-        Ok((packet, addr))
+                .map_err(|_| timeout_error())?,
+            None => recv.await,
+        }
     }
 }
 
@@ -137,7 +135,7 @@ impl AsyncIcmpSocket for AsyncIcmpV4Socket {
         self.core.send_bytes(dest, &raw_packet_bytes(packet)).await
     }
 
-    async fn rcv_from(&mut self) -> io::Result<(Self::PacketType, SockAddr)> {
+    async fn rcv_from(&mut self) -> io::Result<crate::IcmpReceiveResult<Self::PacketType>> {
         self.core.recv().await
     }
 }
@@ -209,7 +207,7 @@ impl AsyncDgramIcmpV4Socket {
     }
 
     /// Receive a packet without filtering replies.
-    pub async fn rcv_from(&mut self) -> io::Result<(Icmpv4Packet, SockAddr)> {
+    pub async fn rcv_from(&mut self) -> io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
         self.core.recv().await
     }
 }

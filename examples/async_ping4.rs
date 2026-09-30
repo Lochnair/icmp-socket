@@ -64,15 +64,15 @@ fn main() -> std::io::Result<()> {
             // Read replies until we see our own destination or time out.
             loop {
                 match socket.rcv_from().await {
-                    Ok((resp, sock_addr)) => {
-                        let addr = match sock_addr.as_socket_ipv4() {
+                    Ok(received) => {
+                        let addr = match received.peer.as_socket_ipv4() {
                             Some(a) => *a.ip(),
                             None => continue,
                         };
                         if addr != parsed_addr {
                             continue;
                         }
-                        if !resp.verify_checksum() {
+                        if !received.packet.verify_checksum() {
                             eprintln!("Discarding packet with invalid checksum");
                             continue;
                         }
@@ -80,7 +80,7 @@ fn main() -> std::io::Result<()> {
                             sequence: seq,
                             payload,
                             ..
-                        } = resp.message
+                        } = received.packet.message
                         {
                             let elapsed = Instant::now() - send_time;
                             println!(
