@@ -64,8 +64,6 @@ mod linux {
                 io::Error::new(io::ErrorKind::InvalidData, "missing ICMP peer address")
             })?;
         let kernel_rx_timestamp = receive_timestamp(&message);
-        buffer.truncate(len.min(capacity));
-
         Ok(ReceivedBytes {
             len,
             peer,

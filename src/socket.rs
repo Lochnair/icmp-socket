@@ -173,7 +173,6 @@ impl Icmp4Core {
 
     fn recv_with_meta(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv4Packet>> {
         self.inner.set_read_timeout(self.opts.timeout)?;
-        self.enable_receive_metadata()?;
         let received = receive::receive(&self.inner, &mut self.buf)?;
         if received.truncated {
             return Err(truncated_error());
@@ -260,10 +259,11 @@ impl IcmpSocket4 {
         self.core.set_read_buffer_size(size);
     }
 
-    /// Receive a packet together with userspace and optional kernel timing metadata.
+    /// Receive a packet together with the metadata available on the socket.
     ///
-    /// On Linux, calling this method enables software receive timestamping on
-    /// this socket and reads the resulting `SCM_TIMESTAMPING` control message.
+    /// On Linux, call [`Self::enable_receive_metadata`] before traffic can
+    /// arrive to request kernel RX timestamps. Without doing so,
+    /// `kernel_rx_timestamp` may be `None`.
     pub fn rcv_from_with_meta(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv4Packet>> {
         self.core.recv_with_meta()
     }
@@ -271,8 +271,7 @@ impl IcmpSocket4 {
     /// Enable the socket options used by [`Self::rcv_from_with_meta`].
     ///
     /// Call this before traffic can arrive when a Linux kernel receive
-    /// timestamp is required. The metadata receive method also calls this
-    /// automatically, but cannot add a timestamp to a packet already queued.
+    /// timestamp is required.
     pub fn enable_receive_metadata(&self) -> std::io::Result<()> {
         self.core.enable_receive_metadata()
     }
@@ -461,10 +460,11 @@ impl DgramIcmpSocket4 {
         self.core.recv()
     }
 
-    /// Receive a packet together with userspace and optional kernel timing metadata.
+    /// Receive a packet together with the metadata available on the socket.
     ///
-    /// On Linux, calling this method enables software receive timestamping on
-    /// this socket and reads the resulting `SCM_TIMESTAMPING` control message.
+    /// On Linux, call [`Self::enable_receive_metadata`] before traffic can
+    /// arrive to request kernel RX timestamps. Without doing so,
+    /// `kernel_rx_timestamp` may be `None`.
     pub fn rcv_from_with_meta(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv4Packet>> {
         self.core.recv_with_meta()
     }
@@ -472,8 +472,7 @@ impl DgramIcmpSocket4 {
     /// Enable the socket options used by [`Self::rcv_from_with_meta`].
     ///
     /// Call this before traffic can arrive when a Linux kernel receive
-    /// timestamp is required. The metadata receive method also calls this
-    /// automatically, but cannot add a timestamp to a packet already queued.
+    /// timestamp is required.
     pub fn enable_receive_metadata(&self) -> std::io::Result<()> {
         self.core.enable_receive_metadata()
     }
@@ -572,13 +571,13 @@ impl IcmpSocket6 {
         self.buf.shrink_to_fit();
     }
 
-    /// Receive a packet together with userspace and optional kernel timing metadata.
+    /// Receive a packet together with the metadata available on the socket.
     ///
-    /// On Linux, calling this method enables software receive timestamping on
-    /// this socket and reads the resulting `SCM_TIMESTAMPING` control message.
+    /// On Linux, call [`Self::enable_receive_metadata`] before traffic can
+    /// arrive to request kernel RX timestamps. Without doing so,
+    /// `kernel_rx_timestamp` may be `None`.
     pub fn rcv_from_with_meta(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv6Packet>> {
         self.inner.set_read_timeout(self.opts.timeout)?;
-        self.enable_receive_metadata()?;
         let received = receive::receive(&self.inner, &mut self.buf)?;
         if received.truncated {
             return Err(truncated_error());
@@ -594,8 +593,7 @@ impl IcmpSocket6 {
     /// Enable the socket options used by [`Self::rcv_from_with_meta`].
     ///
     /// Call this before traffic can arrive when a Linux kernel receive
-    /// timestamp is required. The metadata receive method also calls this
-    /// automatically, but cannot add a timestamp to a packet already queued.
+    /// timestamp is required.
     pub fn enable_receive_metadata(&self) -> std::io::Result<()> {
         receive::configure(&self.inner)
     }

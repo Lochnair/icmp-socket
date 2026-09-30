@@ -100,7 +100,6 @@ impl AsyncIcmp4State {
         &mut self,
         socket: &Socket,
     ) -> io::Result<IcmpReceiveResult<Icmpv4Packet>> {
-        receive::configure(socket)?;
         let received = receive::receive(socket, &mut self.buf)?;
         self.finish_received(received)
     }
@@ -112,7 +111,7 @@ impl AsyncIcmp4State {
         if received.truncated {
             return Err(truncated_error());
         }
-        let packet = self.finish_receive(received.len)?;
+        let packet = Icmpv4Packet::parse_auto(&self.buf[..received.len])?;
         Ok(IcmpReceiveResult {
             packet,
             peer: received.peer,

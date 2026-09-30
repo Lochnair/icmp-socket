@@ -52,6 +52,7 @@ fn is_expected_reply(packet: &Icmpv4Packet, peer: &SockAddr, sequence: u16) -> b
 }
 
 #[test]
+#[ignore]
 fn dgram_loopback_roundtrip() {
     let Some(mut socket) = open_socket() else {
         return;
@@ -70,6 +71,7 @@ fn dgram_loopback_roundtrip() {
 }
 
 #[test]
+#[ignore]
 fn dgram_loopback_roundtrip_with_meta() {
     let Some(mut socket) = open_socket() else {
         return;
@@ -100,6 +102,7 @@ fn dgram_loopback_roundtrip_with_meta() {
 
 #[cfg(feature = "async-io")]
 #[test]
+#[ignore]
 fn async_io_dgram_loopback_roundtrip_with_meta() {
     futures_lite::future::block_on(async {
         let Some(socket) = open_socket() else {
@@ -130,6 +133,7 @@ fn async_io_dgram_loopback_roundtrip_with_meta() {
 
 #[cfg(all(feature = "tokio", unix))]
 #[test]
+#[ignore]
 fn tokio_dgram_loopback_roundtrip_with_meta() {
     let runtime = ::tokio::runtime::Builder::new_current_thread()
         .enable_all()

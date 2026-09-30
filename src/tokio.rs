@@ -131,7 +131,11 @@ impl AsyncIcmpV4Socket {
         self.core.state.set_read_buffer_size(size);
     }
 
-    /// Receive a packet together with userspace and optional kernel timing metadata.
+    /// Receive a packet together with the metadata available on the socket.
+    ///
+    /// On Linux, call [`Self::enable_receive_metadata`] before traffic can
+    /// arrive to request kernel RX timestamps. Without doing so,
+    /// `kernel_rx_timestamp` may be `None`.
     pub async fn rcv_from_with_meta(
         &mut self,
     ) -> io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
@@ -241,7 +245,11 @@ impl AsyncDgramIcmpV4Socket {
         self.core.recv().await
     }
 
-    /// Receive a packet together with userspace and optional kernel timing metadata.
+    /// Receive a packet together with the metadata available on the socket.
+    ///
+    /// On Linux, call [`Self::enable_receive_metadata`] before traffic can
+    /// arrive to request kernel RX timestamps. Without doing so,
+    /// `kernel_rx_timestamp` may be `None`.
     pub async fn rcv_from_with_meta(
         &mut self,
     ) -> io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
