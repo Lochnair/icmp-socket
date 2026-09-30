@@ -20,10 +20,11 @@
 //! backwards-compatible alias for it. The `tokio` feature provides a
 //! first-class Tokio backend for ICMPv4 sockets on Unix.
 pub mod packet;
+mod receive;
 pub mod socket;
 
 pub use packet::{Icmpv4Message, Icmpv4Packet, Icmpv6Message, Icmpv6Packet};
-pub use socket::{DgramIcmpSocket4, IcmpSocket, IcmpSocket4, IcmpSocket6};
+pub use socket::{DgramIcmpSocket4, IcmpReceiveResult, IcmpSocket, IcmpSocket4, IcmpSocket6};
 
 #[cfg(any(feature = "async-io", feature = "tokio"))]
 pub mod async_api;

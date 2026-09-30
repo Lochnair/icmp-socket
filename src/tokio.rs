@@ -62,6 +62,10 @@ impl AsyncIcmp4Core {
         AsyncIcmp4State::local_identifier(self.inner.get_ref())
     }
 
+    fn enable_receive_metadata(&self) -> io::Result<()> {
+        crate::receive::configure(self.inner.get_ref())
+    }
+
     async fn send_bytes(&self, dest: Ipv4Addr, bytes: &[u8]) -> io::Result<()> {
         let dest = self.state.prepare_send(self.inner.get_ref(), dest)?;
         self.inner
@@ -75,14 +79,26 @@ impl AsyncIcmp4Core {
         let recv = self.inner.async_io(Interest::READABLE, |socket| {
             socket.recv_from(self.state.begin_receive())
         });
-        let (read_count, addr) = match timeout {
+        let (read_count, peer) = match timeout {
             Some(duration) => tokio::time::timeout(duration, recv)
                 .await
                 .map_err(|_| timeout_error())??,
             None => recv.await?,
         };
-        let packet = self.state.finish_receive(read_count)?;
-        Ok((packet, addr))
+        Ok((self.state.finish_receive(read_count)?, peer))
+    }
+
+    async fn recv_with_meta(&mut self) -> io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
+        let timeout = self.state.timeout();
+        let recv = self.inner.async_io(Interest::READABLE, |socket| {
+            self.state.receive_with_meta(socket)
+        });
+        match timeout {
+            Some(duration) => tokio::time::timeout(duration, recv)
+                .await
+                .map_err(|_| timeout_error())?,
+            None => recv.await,
+        }
     }
 }
 
@@ -113,6 +129,22 @@ impl AsyncIcmpV4Socket {
     /// Set the size of the per-read receive buffer (default 2048 bytes).
     pub fn set_read_buffer_size(&mut self, size: usize) {
         self.core.state.set_read_buffer_size(size);
+    }
+
+    /// Receive a packet together with the metadata available on the socket.
+    ///
+    /// On Linux, call [`Self::enable_receive_metadata`] before traffic can
+    /// arrive to request kernel RX timestamps. Without doing so,
+    /// `kernel_rx_timestamp` may be `None`.
+    pub async fn rcv_from_with_meta(
+        &mut self,
+    ) -> io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
+        self.core.recv_with_meta().await
+    }
+
+    /// Enable receive metadata before traffic can arrive.
+    pub fn enable_receive_metadata(&self) -> io::Result<()> {
+        self.core.enable_receive_metadata()
     }
 }
 
@@ -211,5 +243,21 @@ impl AsyncDgramIcmpV4Socket {
     /// Receive a packet without filtering replies.
     pub async fn rcv_from(&mut self) -> io::Result<(Icmpv4Packet, SockAddr)> {
         self.core.recv().await
+    }
+
+    /// Receive a packet together with the metadata available on the socket.
+    ///
+    /// On Linux, call [`Self::enable_receive_metadata`] before traffic can
+    /// arrive to request kernel RX timestamps. Without doing so,
+    /// `kernel_rx_timestamp` may be `None`.
+    pub async fn rcv_from_with_meta(
+        &mut self,
+    ) -> io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
+        self.core.recv_with_meta().await
+    }
+
+    /// Enable receive metadata before traffic can arrive.
+    pub fn enable_receive_metadata(&self) -> io::Result<()> {
+        self.core.enable_receive_metadata()
     }
 }

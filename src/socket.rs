@@ -18,12 +18,27 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::{
     convert::{Into, TryFrom, TryInto},
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::packet::{Icmpv4Packet, Icmpv6Packet, WithEchoRequest};
+use crate::receive;
+
+/// One received ICMP packet and the timing and source metadata captured with it.
+#[derive(Debug)]
+pub struct IcmpReceiveResult<P> {
+    /// The parsed ICMP packet.
+    pub packet: P,
+    /// The peer address reported by the socket.
+    pub peer: SockAddr,
+    /// Monotonic userspace sample taken immediately after the receive syscall.
+    pub received_at: Instant,
+    /// Linux kernel receive time from `SCM_TIMESTAMPING`, when provided.
+    /// This uses the kernel realtime clock and is not an [`Instant`].
+    pub kernel_rx_timestamp: Option<SystemTime>,
+}
 
 pub fn ip_to_socket(ip: &IpAddr) -> SocketAddr {
     SocketAddr::new(*ip, 0)
@@ -148,18 +163,31 @@ impl Icmp4Core {
     fn recv(&mut self) -> std::io::Result<(Icmpv4Packet, SockAddr)> {
         self.inner.set_read_timeout(self.opts.timeout)?;
         self.buf.clear();
-        let (read_count, addr) = self.inner.recv_from(self.buf.spare_capacity_mut())?;
-
+        let (read_count, peer) = self.inner.recv_from(self.buf.spare_capacity_mut())?;
         if read_count == self.buf.capacity() {
             return Err(truncated_error());
         }
+        unsafe { self.buf.set_len(read_count) };
+        Ok((Icmpv4Packet::parse_auto(&self.buf[..read_count])?, peer))
+    }
 
-        unsafe {
-            self.buf.set_len(read_count);
+    fn recv_with_meta(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv4Packet>> {
+        self.inner.set_read_timeout(self.opts.timeout)?;
+        let received = receive::receive(&self.inner, &mut self.buf)?;
+        if received.truncated {
+            return Err(truncated_error());
         }
+        let packet = Icmpv4Packet::parse_auto(&self.buf[..received.len])?;
+        Ok(IcmpReceiveResult {
+            packet,
+            peer: received.peer,
+            received_at: received.received_at,
+            kernel_rx_timestamp: received.kernel_rx_timestamp,
+        })
+    }
 
-        let packet = Icmpv4Packet::parse_auto(&self.buf[0..read_count])?;
-        Ok((packet, addr))
+    fn enable_receive_metadata(&self) -> std::io::Result<()> {
+        receive::configure(&self.inner)
     }
 
     #[cfg(any(feature = "async-io", all(feature = "tokio", unix)))]
@@ -229,6 +257,23 @@ impl IcmpSocket4 {
     /// possible truncation rather than returning a partial packet.
     pub fn set_read_buffer_size(&mut self, size: usize) {
         self.core.set_read_buffer_size(size);
+    }
+
+    /// Receive a packet together with the metadata available on the socket.
+    ///
+    /// On Linux, call [`Self::enable_receive_metadata`] before traffic can
+    /// arrive to request kernel RX timestamps. Without doing so,
+    /// `kernel_rx_timestamp` may be `None`.
+    pub fn rcv_from_with_meta(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv4Packet>> {
+        self.core.recv_with_meta()
+    }
+
+    /// Enable the socket options used by [`Self::rcv_from_with_meta`].
+    ///
+    /// Call this before traffic can arrive when a Linux kernel receive
+    /// timestamp is required.
+    pub fn enable_receive_metadata(&self) -> std::io::Result<()> {
+        self.core.enable_receive_metadata()
     }
 
     /// Convert this socket to the `async-io` backend.
@@ -415,6 +460,23 @@ impl DgramIcmpSocket4 {
         self.core.recv()
     }
 
+    /// Receive a packet together with the metadata available on the socket.
+    ///
+    /// On Linux, call [`Self::enable_receive_metadata`] before traffic can
+    /// arrive to request kernel RX timestamps. Without doing so,
+    /// `kernel_rx_timestamp` may be `None`.
+    pub fn rcv_from_with_meta(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv4Packet>> {
+        self.core.recv_with_meta()
+    }
+
+    /// Enable the socket options used by [`Self::rcv_from_with_meta`].
+    ///
+    /// Call this before traffic can arrive when a Linux kernel receive
+    /// timestamp is required.
+    pub fn enable_receive_metadata(&self) -> std::io::Result<()> {
+        self.core.enable_receive_metadata()
+    }
+
     /// Convert this socket to the `async-io` backend.
     #[cfg(feature = "async-io")]
     pub fn into_async_io(self) -> std::io::Result<crate::async_io::AsyncDgramIcmpV4Socket> {
@@ -508,6 +570,33 @@ impl IcmpSocket6 {
         self.buf.resize(size, 0);
         self.buf.shrink_to_fit();
     }
+
+    /// Receive a packet together with the metadata available on the socket.
+    ///
+    /// On Linux, call [`Self::enable_receive_metadata`] before traffic can
+    /// arrive to request kernel RX timestamps. Without doing so,
+    /// `kernel_rx_timestamp` may be `None`.
+    pub fn rcv_from_with_meta(&mut self) -> std::io::Result<IcmpReceiveResult<Icmpv6Packet>> {
+        self.inner.set_read_timeout(self.opts.timeout)?;
+        let received = receive::receive(&self.inner, &mut self.buf)?;
+        if received.truncated {
+            return Err(truncated_error());
+        }
+        Ok(IcmpReceiveResult {
+            packet: self.buf[..received.len].try_into()?,
+            peer: received.peer,
+            received_at: received.received_at,
+            kernel_rx_timestamp: received.kernel_rx_timestamp,
+        })
+    }
+
+    /// Enable the socket options used by [`Self::rcv_from_with_meta`].
+    ///
+    /// Call this before traffic can arrive when a Linux kernel receive
+    /// timestamp is required.
+    pub fn enable_receive_metadata(&self) -> std::io::Result<()> {
+        receive::configure(&self.inner)
+    }
 }
 
 impl IcmpSocket for IcmpSocket6 {
@@ -551,11 +640,9 @@ impl IcmpSocket for IcmpSocket6 {
     fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
         self.inner.set_read_timeout(self.opts.timeout)?;
         self.buf.clear();
-        let (read_count, addr) = self.inner.recv_from(self.buf.spare_capacity_mut())?;
-        unsafe {
-            self.buf.set_len(read_count);
-        }
-        Ok((self.buf[..].try_into()?, addr))
+        let (read_count, peer) = self.inner.recv_from(self.buf.spare_capacity_mut())?;
+        unsafe { self.buf.set_len(read_count) };
+        Ok((self.buf[..].try_into()?, peer))
     }
 
     fn set_timeout(&mut self, timeout: Option<Duration>) {

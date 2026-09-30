@@ -14,6 +14,9 @@ license = "Apache-2.0"
 version = "0.6"
 features = ["all"]
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["net", "uio"] }
+
 [dependencies.thiserror]
 version = "2.0.21"
 
