@@ -19,6 +19,8 @@
 //! The `async-io` feature provides an async-io backend, while `smol` remains a
 //! backwards-compatible alias for it. The `tokio` feature provides a
 //! first-class Tokio backend for ICMPv4 sockets on Unix.
+#[cfg(target_os = "linux")]
+mod filter;
 pub mod packet;
 mod receive;
 pub mod socket;

@@ -111,6 +111,21 @@ pub struct AsyncIcmpV4Socket {
 }
 
 impl AsyncIcmpV4Socket {
+    /// Replace the Linux kernel receive filter with an ICMPv4 type allow-list.
+    ///
+    /// See [`crate::IcmpSocket4::set_allowed_types`] for type numbers, the
+    /// IPv4 filter's 0 through 31 limit, and shared-socket semantics.
+    #[cfg(target_os = "linux")]
+    pub fn set_allowed_types(&self, allowed: &[u8]) -> std::io::Result<()> {
+        crate::filter::set_allowed_types_v4(self.core.inner.get_ref(), allowed)
+    }
+
+    /// Restore the Linux kernel receive filter to allow all ICMPv4 types.
+    #[cfg(target_os = "linux")]
+    pub fn clear_type_filter(&self) -> std::io::Result<()> {
+        crate::filter::clear_type_filter_v4(self.core.inner.get_ref())
+    }
+
     /// Wrap a blocking socket in `async-io`. Construct one via
     /// [`crate::IcmpSocket4::into_async_io`] or the compatibility
     /// [`crate::IcmpSocket4::into_async`].

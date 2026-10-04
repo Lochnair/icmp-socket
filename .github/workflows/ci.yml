@@ -42,4 +42,10 @@ jobs:
       # datagram sockets share identifier 0, so replies are not demuxed between
       # concurrent sockets.
       - name: Loopback ping smoke test
-        run: cargo test --features smol -- --ignored --test-threads=1
+        run: cargo test --features smol --test loopback_ping -- --ignored --test-threads=1
+
+      - name: Linux raw ICMP receive filters
+        if: runner.os == 'Linux'
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -n
+        run: cargo test --all-features --test linux_filters -- --ignored --test-threads=1
