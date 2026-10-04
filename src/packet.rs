@@ -771,6 +771,11 @@ impl Icmpv4Packet {
                 padding: u32_from_be(&bytes[4..8]),
                 header: bytes[8..].to_owned(),
             },
+            12 => Icmpv4Message::ParameterProblem {
+                pointer: bytes[4],
+                padding: (bytes[5], u16_from_be(&bytes[6..8])),
+                header: bytes[8..].to_owned(),
+            },
             4 => Icmpv4Message::Quench {
                 padding: u32_from_be(&bytes[4..8]),
                 header: bytes[8..].to_owned(),

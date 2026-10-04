@@ -48,6 +48,37 @@ The `async-io` backend is reactor integration, not a complete runtime. It uses
 `async-io` readiness and timers directly, while the Tokio backend uses Tokio's
 `AsyncFd` readiness and timeout facilities.
 
+## Linux receive filters
+
+Raw sockets expose `set_allowed_types(&[u8])` on Linux. The kernel filters
+incoming ICMP types before they enter the socket's receive queue:
+
+```rust
+use icmp_socket2::{IcmpSocket4, IcmpSocket6};
+
+let socket4 = IcmpSocket4::new()?;
+socket4.set_allowed_types(&[0, 14])?; // Echo Reply and Timestamp Reply
+// Include errors when needed:
+socket4.set_allowed_types(&[0, 3, 11, 12, 14])?;
+
+let socket6 = IcmpSocket6::new()?;
+socket6.set_allowed_types(&[129])?; // Echo Reply
+socket6.set_allowed_types(&[1, 2, 3, 4, 129])?; // Also allow ICMPv6 errors
+
+socket4.clear_type_filter()?; // Restore reception of all types
+```
+
+Each call replaces the allow-list; an empty list blocks every filterable type.
+Linux's IPv4 `ICMP_FILTER` covers only types 0–31. Higher types always pass,
+and listing one returns `InvalidInput` without changing the current filter.
+IPv6's `ICMP6_FILTER` covers all 256 types.
+
+Filters apply to packets arriving after configuration; queued packets remain.
+They are shared by cloned handles and preserved by async conversions. Both raw
+IPv4 async backends expose the same methods. Filtering does not select an
+identifier or change the kernel's handling of ICMP. These methods are omitted
+on non-Linux targets and on datagram ping sockets.
+
 # API Documentation
 
 https://docs.rs/icmp-socket2

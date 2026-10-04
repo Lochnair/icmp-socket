@@ -235,6 +235,28 @@ impl IcmpSocket4 {
         })
     }
 
+    /// Replace the Linux kernel receive filter with an ICMPv4 type allow-list.
+    ///
+    /// For example, `&[0, 14]` allows Echo Reply and Timestamp Reply; add
+    /// `3`, `11`, and `12` to allow Destination Unreachable, Time Exceeded,
+    /// and Parameter Problem. An empty list blocks all types from 0 through 31.
+    /// Linux always passes types 32 through 255; listing one returns
+    /// [`std::io::ErrorKind::InvalidInput`] without changing the filter.
+    ///
+    /// This only affects incoming packets arriving after the call, including
+    /// receives through cloned handles and async conversions. It does not
+    /// filter by identifier or change the kernel's own ICMP processing.
+    #[cfg(target_os = "linux")]
+    pub fn set_allowed_types(&self, allowed: &[u8]) -> std::io::Result<()> {
+        crate::filter::set_allowed_types_v4(&self.core.inner, allowed)
+    }
+
+    /// Restore the Linux kernel receive filter to allow all ICMPv4 types.
+    #[cfg(target_os = "linux")]
+    pub fn clear_type_filter(&self) -> std::io::Result<()> {
+        crate::filter::clear_type_filter_v4(&self.core.inner)
+    }
+
     /// Try to clone this socket, including its wrapper state.
     ///
     /// The socket must be bound first. The clone shares the underlying OS
@@ -524,6 +546,27 @@ impl IcmpSocket6 {
     pub fn new() -> std::io::Result<Self> {
         let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))?;
         Self::new_from_socket(socket)
+    }
+
+    /// Replace the Linux kernel receive filter with an ICMPv6 type allow-list.
+    ///
+    /// For example, `&[129]` allows Echo Reply; add `1`, `2`, `3`, and `4`
+    /// to allow Destination Unreachable, Packet Too Big, Time Exceeded, and
+    /// Parameter Problem. All 256 types are supported. An empty list blocks
+    /// every type.
+    ///
+    /// This only affects incoming packets arriving after the call, including
+    /// receives through cloned handles. It does not filter by identifier or
+    /// change the kernel's own ICMPv6 processing.
+    #[cfg(target_os = "linux")]
+    pub fn set_allowed_types(&self, allowed: &[u8]) -> std::io::Result<()> {
+        crate::filter::set_allowed_types_v6(&self.inner, allowed)
+    }
+
+    /// Restore the Linux kernel receive filter to allow all ICMPv6 types.
+    #[cfg(target_os = "linux")]
+    pub fn clear_type_filter(&self) -> std::io::Result<()> {
+        crate::filter::clear_type_filter_v6(&self.inner)
     }
 
     /// Try to clone this socket, including its wrapper state.
