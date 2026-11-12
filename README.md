@@ -82,3 +82,22 @@ on non-Linux targets and on datagram ping sockets.
 # API Documentation
 
 https://docs.rs/icmp-socket2
+
+## Externally polled Tokio sockets
+
+The Tokio raw socket exposes `poll_send_to(cx, destination, &packet)` and
+`poll_recv_from_with_meta(cx)`. The datagram socket exposes
+`poll_send(cx, destination, sequence, payload)` and the same metadata receive
+operation. One owner can interleave reads and writes without awaiting either
+socket direction. Polls bound immediate retry work and register readiness wakes.
+
+Send polling computes the usual checksum. `Pending` accepts no datagram;
+`Ok(bytes)` is the accepted transmission, which the caller must account for
+before fallible post-processing. Retain inputs across retries or stop polling
+to withdraw an uncommitted opportunity. These sockets own no scheduling,
+sequence counters, or measurement roles.
+
+Polling receives use caller-owned deadlines and ignore configured receive
+operation timeouts. The async convenience methods continue to apply their
+configured timeout and share send/metadata-receive polling internals. Do not
+install competing waiters for the same readiness direction.

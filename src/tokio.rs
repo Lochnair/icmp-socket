@@ -18,11 +18,19 @@
 //! within an entered runtime context so Tokio can register the socket with its
 //! reactor.
 
-use std::{io, net::Ipv4Addr, time::Duration};
+use std::{
+    future::poll_fn,
+    io,
+    net::Ipv4Addr,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use socket2::{SockAddr, Socket};
 use tokio::io::{Interest, unix::AsyncFd};
+
+const IO_POLL_WORK_BUDGET: usize = 64;
 
 pub use crate::async_api::AsyncIcmpSocket;
 use crate::{
@@ -67,12 +75,56 @@ impl AsyncIcmp4Core {
         crate::receive::configure(self.inner.get_ref())
     }
 
+    fn poll_send_bytes(
+        &self,
+        cx: &mut Context<'_>,
+        dest: Ipv4Addr,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let dest = match self.state.prepare_send(self.inner.get_ref(), dest) {
+            Ok(dest) => dest,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        for _ in 0..IO_POLL_WORK_BUDGET {
+            let mut ready = match self.inner.poll_write_ready(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(ready)) => ready,
+            };
+            match ready.try_io(|inner| inner.get_ref().send_to(bytes, &dest)) {
+                Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Ok(result) => return Poll::Ready(result),
+                Err(_) => continue,
+            }
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+
     async fn send_bytes(&self, dest: Ipv4Addr, bytes: &[u8]) -> io::Result<()> {
-        let dest = self.state.prepare_send(self.inner.get_ref(), dest)?;
-        self.inner
-            .async_io(Interest::WRITABLE, |socket| socket.send_to(bytes, &dest))
-            .await?;
-        Ok(())
+        poll_fn(|cx| self.poll_send_bytes(cx, dest, bytes))
+            .await
+            .map(|_| ())
+    }
+
+    fn poll_recv_with_meta(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<crate::IcmpReceiveResult<Icmpv4Packet>>> {
+        for _ in 0..IO_POLL_WORK_BUDGET {
+            let mut ready = match self.inner.poll_read_ready(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(ready)) => ready,
+            };
+            match ready.try_io(|inner| self.state.receive_with_meta(inner.get_ref())) {
+                Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Ok(result) => return Poll::Ready(result),
+                Err(_) => continue,
+            }
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 
     async fn recv(&mut self) -> io::Result<(Icmpv4Packet, SockAddr)> {
@@ -91,9 +143,7 @@ impl AsyncIcmp4Core {
 
     async fn recv_with_meta(&mut self) -> io::Result<crate::IcmpReceiveResult<Icmpv4Packet>> {
         let timeout = self.state.timeout();
-        let recv = self.inner.async_io(Interest::READABLE, |socket| {
-            self.state.receive_with_meta(socket)
-        });
+        let recv = poll_fn(|cx| self.poll_recv_with_meta(cx));
         match timeout {
             Some(duration) => tokio::time::timeout(duration, recv)
                 .await
@@ -145,6 +195,34 @@ impl AsyncIcmpV4Socket {
     /// Set the size of the per-read receive buffer (default 2048 bytes).
     pub fn set_read_buffer_size(&mut self, size: usize) {
         self.core.state.set_read_buffer_size(size);
+    }
+
+    /// Poll one raw ICMPv4 send, computing the packet checksum as `send_to` does.
+    ///
+    /// Pending registers the write waker and transmits nothing. Retain the
+    /// packet/destination until retry, or simply stop polling to abandon it.
+    /// Ok(bytes) means socket acceptance: account for the send before doing any
+    /// fallible post-processing. This method owns no sequence or retry state.
+    /// Use one owner per readiness direction; reads may progress between polls.
+    pub fn poll_send_to(
+        &mut self,
+        cx: &mut Context<'_>,
+        dest: Ipv4Addr,
+        packet: &Icmpv4Packet,
+    ) -> Poll<io::Result<usize>> {
+        let mut bytes = packet.get_bytes(false);
+        bytes[2..4].copy_from_slice(&packet.calculate_checksum().to_be_bytes());
+        self.core.poll_send_bytes(cx, dest, &bytes)
+    }
+
+    /// Poll bounded receive work with metadata, registering the read waker.
+    /// No socket timeout is applied: the caller owns its timer. Pending has
+    /// consumed no packet; read and write polling may be interleaved by one owner.
+    pub fn poll_recv_from_with_meta(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<crate::IcmpReceiveResult<Icmpv4Packet>>> {
+        self.core.poll_recv_with_meta(cx)
     }
 
     /// Receive a packet together with the metadata available on the socket.
@@ -243,6 +321,32 @@ impl AsyncDgramIcmpV4Socket {
         self.core.bind(addr.into())?;
         self.identifier = self.core.local_identifier()?;
         Ok(())
+    }
+
+    /// Poll an echo send without waiting. Pending registers the write waker
+    /// and accepts no datagram; Ok(bytes) is the accepted transmission.
+    /// Keep inputs unchanged across retries or stop polling to abandon them.
+    pub fn poll_send(
+        &mut self,
+        cx: &mut Context<'_>,
+        dest: Ipv4Addr,
+        sequence: u16,
+        payload: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let bytes = match dgram_packet_bytes(self.identifier, sequence, payload.to_vec()) {
+            Ok(bytes) => bytes,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        self.core.poll_send_bytes(cx, dest, &bytes)
+    }
+
+    /// Poll bounded receive work with metadata. Caller-owned deadlines replace
+    /// the receive timeout for this operation. Use one read readiness owner.
+    pub fn poll_recv_from_with_meta(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<crate::IcmpReceiveResult<Icmpv4Packet>>> {
+        self.core.poll_recv_with_meta(cx)
     }
 
     /// Send an echo request to `dest`.
