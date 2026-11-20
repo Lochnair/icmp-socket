@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     io,
     net::{IpAddr, Ipv4Addr},
@@ -23,24 +24,41 @@ use std::{
 use socket2::{SockAddr, Socket};
 
 use crate::{
-    packet::{Icmpv4Packet, WithEchoRequest},
+    packet::{Icmpv4Packet, encode_icmpv4, encode_icmpv4_echo_request},
     receive::{self, ReceivedBytes},
-    socket::{IcmpReceiveResult, Opts, ip_to_socket, truncated_error},
+    socket::{Icmp4Parts, IcmpReceiveResult, Opts, apply_ttl_v4, ip_to_socket, truncated_error},
 };
 
 pub(crate) struct AsyncIcmp4State {
     bound_to: Option<Ipv4Addr>,
     buf: Vec<u8>,
+    /// Reused buffer holding the packet being sent.
+    send_buf: Vec<u8>,
     opts: Opts,
+    /// The TTL in `opts.hops` has not been applied to the socket yet. Atomic
+    /// because sends only borrow the state shared.
+    ttl_pending: AtomicBool,
 }
 
 impl AsyncIcmp4State {
-    pub(crate) fn new(bound_to: Option<Ipv4Addr>, buf: Vec<u8>, opts: Opts) -> Self {
-        Self {
+    /// Split converted sync socket parts into the OS socket and async state.
+    pub(crate) fn from_parts(parts: Icmp4Parts) -> (Socket, Self) {
+        let Icmp4Parts {
+            inner,
             bound_to,
             buf,
+            send_buf,
             opts,
-        }
+            ttl_pending,
+        } = parts;
+        let state = Self {
+            bound_to,
+            buf,
+            send_buf,
+            opts,
+            ttl_pending: AtomicBool::new(ttl_pending),
+        };
+        (inner, state)
     }
 
     pub(crate) fn bound_to(&self) -> Option<Ipv4Addr> {
@@ -60,8 +78,9 @@ impl AsyncIcmp4State {
         self.opts.timeout
     }
 
-    pub(crate) fn set_max_hops(&mut self, hops: u32) {
+    pub(crate) fn set_max_hops(&mut self, socket: &Socket, hops: u32) {
         self.opts.hops = hops;
+        *self.ttl_pending.get_mut() = apply_ttl_v4(socket, hops);
     }
 
     pub(crate) fn bind(&mut self, socket: &Socket, addr: Ipv4Addr) -> io::Result<()> {
@@ -75,8 +94,28 @@ impl AsyncIcmp4State {
         Ok(addr.as_socket_ipv4().map(|s| s.port()).unwrap_or(0))
     }
 
+    /// Stage a raw packet, checksum computed, as the next send.
+    pub(crate) fn stage_packet(&mut self, packet: &Icmpv4Packet) {
+        encode_icmpv4(packet, &mut self.send_buf);
+    }
+
+    /// Stage an echo request, checksum computed, as the next send.
+    pub(crate) fn stage_echo_request(&mut self, identifier: u16, sequence: u16, payload: &[u8]) {
+        encode_icmpv4_echo_request(identifier, sequence, payload, &mut self.send_buf);
+    }
+
+    /// The staged packet bytes.
+    pub(crate) fn staged(&self) -> &[u8] {
+        &self.send_buf
+    }
+
+    /// Resolve `dest`, first applying a TTL that an earlier `set_max_hops`
+    /// could not, so its error surfaces on the send.
     pub(crate) fn prepare_send(&self, socket: &Socket, dest: Ipv4Addr) -> io::Result<SockAddr> {
-        socket.set_ttl_v4(self.opts.hops)?;
+        if self.ttl_pending.load(Ordering::Relaxed) {
+            socket.set_ttl_v4(self.opts.hops)?;
+            self.ttl_pending.store(false, Ordering::Relaxed);
+        }
         Ok(ip_to_socket(&IpAddr::V4(dest)).into())
     }
 
@@ -122,19 +161,6 @@ impl AsyncIcmp4State {
     }
 }
 
-pub(crate) fn raw_packet_bytes(packet: Icmpv4Packet) -> Vec<u8> {
-    packet.with_checksum().get_bytes(true)
-}
-
-pub(crate) fn dgram_packet_bytes(
-    identifier: u16,
-    sequence: u16,
-    payload: Vec<u8>,
-) -> io::Result<Vec<u8>> {
-    let packet = Icmpv4Packet::with_echo_request(identifier, sequence, payload)?;
-    Ok(raw_packet_bytes(packet))
-}
-
 pub(crate) fn timeout_error() -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, "rcv_from timed out")
 }
@@ -145,14 +171,22 @@ mod tests {
     use crate::packet::Icmpv4Message;
 
     fn state_with_buffer(size: usize) -> AsyncIcmp4State {
-        AsyncIcmp4State::new(
-            None,
-            vec![0; size],
-            Opts {
+        AsyncIcmp4State {
+            bound_to: None,
+            buf: vec![0; size],
+            send_buf: Vec::new(),
+            opts: Opts {
                 hops: 50,
                 timeout: None,
             },
-        )
+            ttl_pending: AtomicBool::new(false),
+        }
+    }
+
+    fn echo_request_bytes(identifier: u16, sequence: u16, payload: &[u8]) -> Vec<u8> {
+        let mut state = state_with_buffer(0);
+        state.stage_echo_request(identifier, sequence, payload);
+        state.staged().to_vec()
     }
 
     fn write_receive_bytes(state: &mut AsyncIcmp4State, bytes: &[u8]) {
@@ -174,7 +208,7 @@ mod tests {
 
     #[test]
     fn receive_finalization_parses_headerless_packet() {
-        let bytes = dgram_packet_bytes(42, 7, vec![1, 2, 3, 4]).unwrap();
+        let bytes = echo_request_bytes(42, 7, &[1, 2, 3, 4]);
         let mut state = state_with_buffer(64);
         write_receive_bytes(&mut state, &bytes);
 
@@ -209,16 +243,14 @@ mod tests {
         let mut state = state_with_buffer(8);
         let timeout = Duration::from_millis(250);
         state.set_timeout(Some(timeout));
-        state.set_max_hops(17);
 
         assert_eq!(state.timeout(), Some(timeout));
-        assert_eq!(state.opts.hops, 17);
         assert_eq!(state.bound_to(), None);
     }
 
     #[test]
     fn packet_preparation_sets_checksum_and_identifier() {
-        let bytes = dgram_packet_bytes(123, 9, vec![5, 6]).unwrap();
+        let bytes = echo_request_bytes(123, 9, &[5, 6]);
         let packet = Icmpv4Packet::parse_dgram(bytes).unwrap();
 
         assert!(packet.verify_checksum());

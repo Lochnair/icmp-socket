@@ -52,6 +52,50 @@ fn ipv6_sum_words(ip: &Ipv6Addr) -> u32 {
     ip.segments().iter().map(|x| *x as u32).sum()
 }
 
+/// The ICMPv4 checksum of `bytes`, a serialized message whose checksum field
+/// is zero.
+fn icmpv4_checksum(bytes: &[u8]) -> u16 {
+    let mut sum = sum_big_endian_words(bytes);
+    // handle the carry
+    while sum >> 16 != 0 {
+        sum = (sum >> 16) + (sum & 0xFFFF);
+    }
+    !sum as u16
+}
+
+/// Fill in the checksum field of a serialized ICMPv4 message whose checksum
+/// field is zero.
+fn fill_icmpv4_checksum(bytes: &mut [u8]) {
+    let checksum = icmpv4_checksum(bytes);
+    bytes[2..4].copy_from_slice(&checksum.to_be_bytes());
+}
+
+/// Replace `out` with `packet`'s wire bytes, checksum computed. This is what
+/// `packet.with_checksum().get_bytes(true)` produces, without consuming the
+/// packet or allocating once `out` has grown to size.
+pub(crate) fn encode_icmpv4(packet: &Icmpv4Packet, out: &mut Vec<u8>) {
+    out.clear();
+    packet.write_bytes(false, out);
+    fill_icmpv4_checksum(out);
+}
+
+/// Replace `out` with the wire bytes of an ICMPv4 echo request, checksum
+/// computed, without building an [`Icmpv4Packet`] or copying the payload into
+/// one.
+pub(crate) fn encode_icmpv4_echo_request(
+    identifier: u16,
+    sequence: u16,
+    payload: &[u8],
+    out: &mut Vec<u8>,
+) {
+    out.clear();
+    out.extend_from_slice(&[8, 0, 0, 0]);
+    out.extend_from_slice(&identifier.to_be_bytes());
+    out.extend_from_slice(&sequence.to_be_bytes());
+    out.extend_from_slice(payload);
+    fill_icmpv4_checksum(out);
+}
+
 fn sum_big_endian_words(bs: &[u8]) -> u32 {
     if bs.len() == 0 {
         return 0;
@@ -205,6 +249,13 @@ impl Icmpv6Message {
     /// Get this Icmpv6Message serialized to bytes.
     pub fn get_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
+        self.write_bytes(&mut bytes);
+        bytes
+    }
+
+    /// Append this Icmpv6Message's serialized bytes to `bytes`, so callers can
+    /// reuse one buffer instead of allocating per packet.
+    pub fn write_bytes(&self, bytes: &mut Vec<u8>) {
         match self {
             Unreachable {
                 _unused: field1,
@@ -244,7 +295,6 @@ impl Icmpv6Message {
                 bytes.extend_from_slice(payload);
             }
         }
-        bytes
     }
 }
 
@@ -325,11 +375,18 @@ impl Icmpv6Packet {
     /// Get this packet serialized to bytes suitable for sending on the wire.
     pub fn get_bytes(&self, with_checksum: bool) -> Vec<u8> {
         let mut bytes = Vec::new();
+        self.write_bytes(with_checksum, &mut bytes);
+        bytes
+    }
+
+    /// Append this packet's wire bytes to `bytes`, so callers can reuse one
+    /// buffer instead of allocating per packet. `with_checksum` has the same
+    /// meaning as for [`Self::get_bytes`].
+    pub fn write_bytes(&self, with_checksum: bool, bytes: &mut Vec<u8>) {
         bytes.push(self.typ);
         bytes.push(self.code);
         bytes.extend_from_slice(&(if with_checksum { self.checksum } else { 0 }).to_be_bytes());
-        bytes.append(&mut self.message.get_bytes());
-        return bytes;
+        self.message.write_bytes(bytes);
     }
 
     /// Calculate the checksum for the packet given the provided source and destination
@@ -596,6 +653,13 @@ impl Icmpv4Message {
     /// Get this Icmpv4Message serialized as bytes.
     pub fn get_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(20);
+        self.write_bytes(&mut bytes);
+        bytes
+    }
+
+    /// Append this Icmpv4Message's serialized bytes to `bytes`, so callers can
+    /// reuse one buffer instead of allocating per packet.
+    pub fn write_bytes(&self, bytes: &mut Vec<u8>) {
         match self {
             Self::Unreachable {
                 // type 3
@@ -683,7 +747,6 @@ impl Icmpv4Message {
                 bytes.extend_from_slice(&sequence.to_be_bytes());
             }
         }
-        bytes
     }
 }
 
@@ -841,29 +904,26 @@ impl Icmpv4Packet {
     /// Get this packet serialized to bytes suitable for sending on the wire.
     pub fn get_bytes(&self, with_checksum: bool) -> Vec<u8> {
         let mut bytes = Vec::new();
+        self.write_bytes(with_checksum, &mut bytes);
+        bytes
+    }
+
+    /// Append this packet's wire bytes to `bytes`, so callers can reuse one
+    /// buffer instead of allocating per packet. `with_checksum` has the same
+    /// meaning as for [`Self::get_bytes`].
+    pub fn write_bytes(&self, with_checksum: bool, bytes: &mut Vec<u8>) {
         bytes.push(self.typ);
         bytes.push(self.code);
         bytes.extend_from_slice(&(if with_checksum { self.checksum } else { 0 }).to_be_bytes());
-        bytes.append(&mut self.message.get_bytes());
-        return bytes;
+        self.message.write_bytes(bytes);
     }
 
     /// Calculate the checksum for the packet given the provided source and destination
     /// addresses.
     pub fn calculate_checksum(&self) -> u16 {
-        // First sum the pseudo header
-        let mut sum = 0u32;
-
-        // Then sum the len of the message bytes and then the message bytes starting
-        // with the message type field and with the checksum field set to 0.
-        let bytes = self.get_bytes(false);
-        sum += sum_big_endian_words(&bytes);
-
-        // handle the carry
-        while sum >> 16 != 0 {
-            sum = (sum >> 16) + (sum & 0xFFFF);
-        }
-        !sum as u16
+        // Sum the message bytes starting with the message type field and with
+        // the checksum field set to 0.
+        icmpv4_checksum(&self.get_bytes(false))
     }
 
     /// Populate the checksum field of this Packet.

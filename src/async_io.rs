@@ -28,9 +28,9 @@ use socket2::{SockAddr, Socket};
 
 pub use crate::async_api::AsyncIcmpSocket;
 use crate::{
-    async_common::{AsyncIcmp4State, dgram_packet_bytes, raw_packet_bytes, timeout_error},
+    async_common::{AsyncIcmp4State, timeout_error},
     packet::Icmpv4Packet,
-    socket::Opts,
+    socket::Icmp4Parts,
 };
 
 struct AsyncIcmp4Core {
@@ -39,16 +39,16 @@ struct AsyncIcmp4Core {
 }
 
 impl AsyncIcmp4Core {
-    fn new(
-        inner: Socket,
-        bound_to: Option<Ipv4Addr>,
-        buf: Vec<u8>,
-        opts: Opts,
-    ) -> std::io::Result<Self> {
+    fn new(parts: Icmp4Parts) -> std::io::Result<Self> {
+        let (inner, state) = AsyncIcmp4State::from_parts(parts);
         Ok(Self {
             inner: Async::new(inner)?,
-            state: AsyncIcmp4State::new(bound_to, buf, opts),
+            state,
         })
+    }
+
+    fn set_max_hops(&mut self, hops: u32) {
+        self.state.set_max_hops(self.inner.get_ref(), hops);
     }
 
     fn bind(&mut self, addr: Ipv4Addr) -> std::io::Result<()> {
@@ -63,8 +63,10 @@ impl AsyncIcmp4Core {
         crate::receive::configure(self.inner.get_ref())
     }
 
-    async fn send_bytes(&self, dest: Ipv4Addr, bytes: &[u8]) -> std::io::Result<()> {
+    /// Send the packet staged in the state's send buffer.
+    async fn send_staged(&self, dest: Ipv4Addr) -> std::io::Result<()> {
         let dest = self.state.prepare_send(self.inner.get_ref(), dest)?;
+        let bytes = self.state.staged();
         self.inner
             .write_with(|socket| socket.send_to(bytes, &dest))
             .await?;
@@ -129,14 +131,9 @@ impl AsyncIcmpV4Socket {
     /// Wrap a blocking socket in `async-io`. Construct one via
     /// [`crate::IcmpSocket4::into_async_io`] or the compatibility
     /// [`crate::IcmpSocket4::into_async`].
-    pub(crate) fn new(
-        inner: Socket,
-        bound_to: Option<Ipv4Addr>,
-        buf: Vec<u8>,
-        opts: Opts,
-    ) -> std::io::Result<Self> {
+    pub(crate) fn new(parts: Icmp4Parts) -> std::io::Result<Self> {
         Ok(Self {
-            core: AsyncIcmp4Core::new(inner, bound_to, buf, opts)?,
+            core: AsyncIcmp4Core::new(parts)?,
         })
     }
 
@@ -177,7 +174,7 @@ impl AsyncIcmpSocket for AsyncIcmpV4Socket {
     }
 
     fn set_max_hops(&mut self, hops: u32) {
-        self.core.state.set_max_hops(hops);
+        self.core.set_max_hops(hops);
     }
 
     async fn bind<A: Into<Self::AddrType> + Send>(&mut self, addr: A) -> std::io::Result<()> {
@@ -189,7 +186,8 @@ impl AsyncIcmpSocket for AsyncIcmpV4Socket {
         dest: Self::AddrType,
         packet: Self::PacketType,
     ) -> std::io::Result<()> {
-        self.core.send_bytes(dest, &raw_packet_bytes(packet)).await
+        self.core.state.stage_packet(&packet);
+        self.core.send_staged(dest).await
     }
 
     async fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
@@ -206,15 +204,9 @@ pub struct AsyncDgramIcmpV4Socket {
 impl AsyncDgramIcmpV4Socket {
     /// Construct one via [`crate::DgramIcmpSocket4::into_async_io`] or the
     /// compatibility [`crate::DgramIcmpSocket4::into_async`].
-    pub(crate) fn new(
-        inner: Socket,
-        bound_to: Option<Ipv4Addr>,
-        buf: Vec<u8>,
-        opts: Opts,
-        identifier: u16,
-    ) -> std::io::Result<Self> {
+    pub(crate) fn new(parts: Icmp4Parts, identifier: u16) -> std::io::Result<Self> {
         Ok(Self {
-            core: AsyncIcmp4Core::new(inner, bound_to, buf, opts)?,
+            core: AsyncIcmp4Core::new(parts)?,
             identifier,
         })
     }
@@ -241,7 +233,7 @@ impl AsyncDgramIcmpV4Socket {
 
     /// Sets the TTL for packets sent on this socket.
     pub fn set_max_hops(&mut self, hops: u32) {
-        self.core.state.set_max_hops(hops);
+        self.core.set_max_hops(hops);
     }
 
     /// Bind the socket and establish its identifier from the assigned local
@@ -259,8 +251,10 @@ impl AsyncDgramIcmpV4Socket {
         sequence: u16,
         payload: Vec<u8>,
     ) -> std::io::Result<()> {
-        let bytes = dgram_packet_bytes(self.identifier, sequence, payload)?;
-        self.core.send_bytes(dest, &bytes).await
+        self.core
+            .state
+            .stage_echo_request(self.identifier, sequence, &payload);
+        self.core.send_staged(dest).await
     }
 
     /// Receive a packet without filtering replies.

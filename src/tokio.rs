@@ -34,9 +34,9 @@ const IO_POLL_WORK_BUDGET: usize = 64;
 
 pub use crate::async_api::AsyncIcmpSocket;
 use crate::{
-    async_common::{AsyncIcmp4State, dgram_packet_bytes, raw_packet_bytes, timeout_error},
+    async_common::{AsyncIcmp4State, timeout_error},
     packet::Icmpv4Packet,
-    socket::Opts,
+    socket::Icmp4Parts,
 };
 
 struct AsyncIcmp4Core {
@@ -45,12 +45,8 @@ struct AsyncIcmp4Core {
 }
 
 impl AsyncIcmp4Core {
-    fn new(
-        inner: Socket,
-        bound_to: Option<Ipv4Addr>,
-        buf: Vec<u8>,
-        opts: Opts,
-    ) -> io::Result<Self> {
+    fn new(parts: Icmp4Parts) -> io::Result<Self> {
+        let (inner, state) = AsyncIcmp4State::from_parts(parts);
         tokio::runtime::Handle::try_current().map_err(|error| {
             io::Error::other(format!(
                 "into_tokio requires an entered Tokio runtime: {error}"
@@ -59,8 +55,12 @@ impl AsyncIcmp4Core {
         inner.set_nonblocking(true)?;
         Ok(Self {
             inner: AsyncFd::new(inner)?,
-            state: AsyncIcmp4State::new(bound_to, buf, opts),
+            state,
         })
+    }
+
+    fn set_max_hops(&mut self, hops: u32) {
+        self.state.set_max_hops(self.inner.get_ref(), hops);
     }
 
     fn bind(&mut self, addr: Ipv4Addr) -> io::Result<()> {
@@ -75,16 +75,13 @@ impl AsyncIcmp4Core {
         crate::receive::configure(self.inner.get_ref())
     }
 
-    fn poll_send_bytes(
-        &self,
-        cx: &mut Context<'_>,
-        dest: Ipv4Addr,
-        bytes: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    /// Poll a send of the packet staged in the state's send buffer.
+    fn poll_send_staged(&self, cx: &mut Context<'_>, dest: Ipv4Addr) -> Poll<io::Result<usize>> {
         let dest = match self.state.prepare_send(self.inner.get_ref(), dest) {
             Ok(dest) => dest,
             Err(error) => return Poll::Ready(Err(error)),
         };
+        let bytes = self.state.staged();
         for _ in 0..IO_POLL_WORK_BUDGET {
             let mut ready = match self.inner.poll_write_ready(cx) {
                 Poll::Pending => return Poll::Pending,
@@ -101,8 +98,8 @@ impl AsyncIcmp4Core {
         Poll::Pending
     }
 
-    async fn send_bytes(&self, dest: Ipv4Addr, bytes: &[u8]) -> io::Result<()> {
-        poll_fn(|cx| self.poll_send_bytes(cx, dest, bytes))
+    async fn send_staged(&self, dest: Ipv4Addr) -> io::Result<()> {
+        poll_fn(|cx| self.poll_send_staged(cx, dest))
             .await
             .map(|_| ())
     }
@@ -176,14 +173,9 @@ impl AsyncIcmpV4Socket {
 
     /// Register a socket with the current Tokio runtime. Construct one via
     /// [`crate::IcmpSocket4::into_tokio`].
-    pub(crate) fn new(
-        inner: Socket,
-        bound_to: Option<Ipv4Addr>,
-        buf: Vec<u8>,
-        opts: Opts,
-    ) -> io::Result<Self> {
+    pub(crate) fn new(parts: Icmp4Parts) -> io::Result<Self> {
         Ok(Self {
-            core: AsyncIcmp4Core::new(inner, bound_to, buf, opts)?,
+            core: AsyncIcmp4Core::new(parts)?,
         })
     }
 
@@ -210,9 +202,8 @@ impl AsyncIcmpV4Socket {
         dest: Ipv4Addr,
         packet: &Icmpv4Packet,
     ) -> Poll<io::Result<usize>> {
-        let mut bytes = packet.get_bytes(false);
-        bytes[2..4].copy_from_slice(&packet.calculate_checksum().to_be_bytes());
-        self.core.poll_send_bytes(cx, dest, &bytes)
+        self.core.state.stage_packet(packet);
+        self.core.poll_send_staged(cx, dest)
     }
 
     /// Poll bounded receive work with metadata, registering the read waker.
@@ -252,7 +243,7 @@ impl AsyncIcmpSocket for AsyncIcmpV4Socket {
     }
 
     fn set_max_hops(&mut self, hops: u32) {
-        self.core.state.set_max_hops(hops);
+        self.core.set_max_hops(hops);
     }
 
     async fn bind<A: Into<Self::AddrType> + Send>(&mut self, addr: A) -> io::Result<()> {
@@ -260,7 +251,8 @@ impl AsyncIcmpSocket for AsyncIcmpV4Socket {
     }
 
     async fn send_to(&mut self, dest: Self::AddrType, packet: Self::PacketType) -> io::Result<()> {
-        self.core.send_bytes(dest, &raw_packet_bytes(packet)).await
+        self.core.state.stage_packet(&packet);
+        self.core.send_staged(dest).await
     }
 
     async fn rcv_from(&mut self) -> io::Result<(Self::PacketType, SockAddr)> {
@@ -277,15 +269,9 @@ pub struct AsyncDgramIcmpV4Socket {
 impl AsyncDgramIcmpV4Socket {
     /// Register a socket with the current Tokio runtime. Construct one via
     /// [`crate::DgramIcmpSocket4::into_tokio`].
-    pub(crate) fn new(
-        inner: Socket,
-        bound_to: Option<Ipv4Addr>,
-        buf: Vec<u8>,
-        opts: Opts,
-        identifier: u16,
-    ) -> io::Result<Self> {
+    pub(crate) fn new(parts: Icmp4Parts, identifier: u16) -> io::Result<Self> {
         Ok(Self {
-            core: AsyncIcmp4Core::new(inner, bound_to, buf, opts)?,
+            core: AsyncIcmp4Core::new(parts)?,
             identifier,
         })
     }
@@ -312,7 +298,7 @@ impl AsyncDgramIcmpV4Socket {
 
     /// Sets the TTL for packets sent on this socket.
     pub fn set_max_hops(&mut self, hops: u32) {
-        self.core.state.set_max_hops(hops);
+        self.core.set_max_hops(hops);
     }
 
     /// Bind the socket and establish its identifier from the assigned local
@@ -333,11 +319,10 @@ impl AsyncDgramIcmpV4Socket {
         sequence: u16,
         payload: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let bytes = match dgram_packet_bytes(self.identifier, sequence, payload.to_vec()) {
-            Ok(bytes) => bytes,
-            Err(error) => return Poll::Ready(Err(error)),
-        };
-        self.core.poll_send_bytes(cx, dest, &bytes)
+        self.core
+            .state
+            .stage_echo_request(self.identifier, sequence, payload);
+        self.core.poll_send_staged(cx, dest)
     }
 
     /// Poll bounded receive work with metadata. Caller-owned deadlines replace
@@ -356,8 +341,10 @@ impl AsyncDgramIcmpV4Socket {
         sequence: u16,
         payload: Vec<u8>,
     ) -> io::Result<()> {
-        let bytes = dgram_packet_bytes(self.identifier, sequence, payload)?;
-        self.core.send_bytes(dest, &bytes).await
+        self.core
+            .state
+            .stage_echo_request(self.identifier, sequence, &payload);
+        self.core.send_staged(dest).await
     }
 
     /// Receive a packet without filtering replies.
