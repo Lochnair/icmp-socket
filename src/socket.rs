@@ -23,7 +23,7 @@ use std::{
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-use crate::packet::{Icmpv4Packet, Icmpv6Packet, WithEchoRequest};
+use crate::packet::{Icmpv4Packet, Icmpv6Packet, encode_icmpv4, encode_icmpv4_echo_request};
 use crate::receive;
 
 /// One received ICMP packet and the timing and source metadata captured with it.
@@ -57,6 +57,10 @@ pub trait IcmpSocket {
 
     /// Sets the ttl for packets sent on this socket. Controls the number of
     /// hops the packet will be allowed to traverse.
+    ///
+    /// The TTL is a socket option, applied when it is set rather than on every
+    /// send, so it is shared by every clone of the underlying OS socket. If
+    /// the kernel rejects it, the next send retries and reports the error.
     fn set_max_hops(&mut self, hops: u32);
 
     /// Binds this socket to an address.
@@ -92,6 +96,17 @@ pub struct Opts {
 /// bigger buffer via `set_read_buffer_size`.
 const DEFAULT_RECV_BUFFER_SIZE: usize = 2048;
 
+/// Initial capacity of the reused send buffer: an ICMP header plus a typical
+/// ping payload. It grows to fit larger packets once and is reused after.
+const DEFAULT_SEND_BUFFER_SIZE: usize = 64;
+
+/// Apply `hops` as the IPv4 TTL of `socket`, the socket option every send
+/// relies on. Returns whether the option is still pending: on failure the
+/// caller retries before the next send, which then reports the error.
+pub(crate) fn apply_ttl_v4(socket: &Socket, hops: u32) -> bool {
+    socket.set_ttl_v4(hops).is_err()
+}
+
 /// Shared low-level state and operations for the ICMPv4 sockets. This keeps the
 /// public socket types thin: the raw and datagram sockets differ only in how a
 /// packet is sent, not in binding, receiving, or option handling.
@@ -99,19 +114,26 @@ struct Icmp4Core {
     inner: Socket,
     bound_to: Option<Ipv4Addr>,
     buf: Vec<u8>,
+    send_buf: Vec<u8>,
     opts: Opts,
+    /// The TTL in `opts.hops` has not been applied to `inner` yet.
+    ttl_pending: bool,
 }
 
 impl Icmp4Core {
     fn from_socket(inner: Socket) -> std::io::Result<Self> {
+        let hops = 50;
+        inner.set_ttl_v4(hops)?;
         Ok(Self {
             inner,
             bound_to: None,
             buf: vec![0; DEFAULT_RECV_BUFFER_SIZE],
+            send_buf: Vec::with_capacity(DEFAULT_SEND_BUFFER_SIZE),
             opts: Opts {
-                hops: 50,
+                hops,
                 timeout: None,
             },
+            ttl_pending: false,
         })
     }
 
@@ -127,11 +149,18 @@ impl Icmp4Core {
             inner: self.inner.try_clone()?,
             bound_to: self.bound_to,
             buf: vec![0; self.buf.capacity()],
+            send_buf: Vec::with_capacity(self.send_buf.capacity()),
             opts: Opts {
                 hops: self.opts.hops,
                 timeout: self.opts.timeout,
             },
+            ttl_pending: self.ttl_pending,
         })
+    }
+
+    fn set_max_hops(&mut self, hops: u32) {
+        self.opts.hops = hops;
+        self.ttl_pending = apply_ttl_v4(&self.inner, hops);
     }
 
     fn bind(&mut self, addr: Ipv4Addr) -> std::io::Result<()> {
@@ -153,10 +182,14 @@ impl Icmp4Core {
         Ok(addr.as_socket_ipv4().map(|s| s.port()).unwrap_or(0))
     }
 
-    fn send_bytes(&self, dest: Ipv4Addr, bytes: &[u8]) -> std::io::Result<()> {
-        self.inner.set_ttl_v4(self.opts.hops)?;
+    /// Send the packet staged in `send_buf`.
+    fn send_staged(&mut self, dest: Ipv4Addr) -> std::io::Result<()> {
+        if self.ttl_pending {
+            self.inner.set_ttl_v4(self.opts.hops)?;
+            self.ttl_pending = false;
+        }
         let dest = ip_to_socket(&IpAddr::V4(dest));
-        self.inner.send_to(bytes, &(dest.into()))?;
+        self.inner.send_to(&self.send_buf, &(dest.into()))?;
         Ok(())
     }
 
@@ -196,17 +229,21 @@ impl Icmp4Core {
             inner: self.inner,
             bound_to: self.bound_to,
             buf: self.buf,
+            send_buf: self.send_buf,
             opts: self.opts,
+            ttl_pending: self.ttl_pending,
         }
     }
 }
 
 #[cfg(any(feature = "async-io", all(feature = "tokio", unix)))]
-struct Icmp4Parts {
-    inner: Socket,
-    bound_to: Option<Ipv4Addr>,
-    buf: Vec<u8>,
-    opts: Opts,
+pub(crate) struct Icmp4Parts {
+    pub(crate) inner: Socket,
+    pub(crate) bound_to: Option<Ipv4Addr>,
+    pub(crate) buf: Vec<u8>,
+    pub(crate) send_buf: Vec<u8>,
+    pub(crate) opts: Opts,
+    pub(crate) ttl_pending: bool,
 }
 
 /// The error returned when a received packet filled the read buffer and may
@@ -301,13 +338,7 @@ impl IcmpSocket4 {
     /// Convert this socket to the `async-io` backend.
     #[cfg(feature = "async-io")]
     pub fn into_async_io(self) -> std::io::Result<crate::async_io::AsyncIcmpV4Socket> {
-        let Icmp4Parts {
-            inner,
-            bound_to,
-            buf,
-            opts,
-        } = self.core.into_parts();
-        crate::async_io::AsyncIcmpV4Socket::new(inner, bound_to, buf, opts)
+        crate::async_io::AsyncIcmpV4Socket::new(self.core.into_parts())
     }
 
     /// Convert this socket to the Tokio backend.
@@ -315,13 +346,7 @@ impl IcmpSocket4 {
     /// This must be called from within an entered Tokio runtime context.
     #[cfg(all(feature = "tokio", unix))]
     pub fn into_tokio(self) -> std::io::Result<crate::tokio::AsyncIcmpV4Socket> {
-        let Icmp4Parts {
-            inner,
-            bound_to,
-            buf,
-            opts,
-        } = self.core.into_parts();
-        crate::tokio::AsyncIcmpV4Socket::new(inner, bound_to, buf, opts)
+        crate::tokio::AsyncIcmpV4Socket::new(self.core.into_parts())
     }
 
     /// Convert this socket to the backwards-compatible `smol` async API.
@@ -336,7 +361,7 @@ impl IcmpSocket for IcmpSocket4 {
     type PacketType = Icmpv4Packet;
 
     fn set_max_hops(&mut self, hops: u32) {
-        self.core.opts.hops = hops;
+        self.core.set_max_hops(hops);
     }
 
     fn bind<A: Into<Self::AddrType>>(&mut self, addr: A) -> std::io::Result<()> {
@@ -344,8 +369,8 @@ impl IcmpSocket for IcmpSocket4 {
     }
 
     fn send_to(&mut self, dest: Self::AddrType, packet: Self::PacketType) -> std::io::Result<()> {
-        self.core
-            .send_bytes(dest, &packet.with_checksum().get_bytes(true))
+        encode_icmpv4(&packet, &mut self.core.send_buf);
+        self.core.send_staged(dest)
     }
 
     fn rcv_from(&mut self) -> std::io::Result<(Self::PacketType, SockAddr)> {
@@ -459,8 +484,12 @@ impl DgramIcmpSocket4 {
     }
 
     /// Sets the ttl for packets sent on this socket.
+    ///
+    /// The TTL is a socket option, applied here rather than on every send, so
+    /// it is shared by every clone of the underlying OS socket. If the kernel
+    /// rejects it, the next send retries and reports the error.
     pub fn set_max_hops(&mut self, hops: u32) {
-        self.core.opts.hops = hops;
+        self.core.set_max_hops(hops);
     }
 
     /// Sets the timeout on the socket for `rcv_from`. A value of None blocks.
@@ -471,9 +500,8 @@ impl DgramIcmpSocket4 {
     /// Send an echo request to `dest`. The identifier is supplied by the socket,
     /// so the caller provides only the sequence number and payload.
     pub fn send(&mut self, dest: Ipv4Addr, sequence: u16, payload: Vec<u8>) -> std::io::Result<()> {
-        let packet = Icmpv4Packet::with_echo_request(self.identifier, sequence, payload)?;
-        self.core
-            .send_bytes(dest, &packet.with_checksum().get_bytes(true))
+        encode_icmpv4_echo_request(self.identifier, sequence, &payload, &mut self.core.send_buf);
+        self.core.send_staged(dest)
     }
 
     /// Receive a packet. Replies are not filtered; compare against
@@ -502,13 +530,7 @@ impl DgramIcmpSocket4 {
     /// Convert this socket to the `async-io` backend.
     #[cfg(feature = "async-io")]
     pub fn into_async_io(self) -> std::io::Result<crate::async_io::AsyncDgramIcmpV4Socket> {
-        let Icmp4Parts {
-            inner,
-            bound_to,
-            buf,
-            opts,
-        } = self.core.into_parts();
-        crate::async_io::AsyncDgramIcmpV4Socket::new(inner, bound_to, buf, opts, self.identifier)
+        crate::async_io::AsyncDgramIcmpV4Socket::new(self.core.into_parts(), self.identifier)
     }
 
     /// Convert this socket to the Tokio backend.
@@ -516,13 +538,7 @@ impl DgramIcmpSocket4 {
     /// This must be called from within an entered Tokio runtime context.
     #[cfg(all(feature = "tokio", unix))]
     pub fn into_tokio(self) -> std::io::Result<crate::tokio::AsyncDgramIcmpV4Socket> {
-        let Icmp4Parts {
-            inner,
-            bound_to,
-            buf,
-            opts,
-        } = self.core.into_parts();
-        crate::tokio::AsyncDgramIcmpV4Socket::new(inner, bound_to, buf, opts, self.identifier)
+        crate::tokio::AsyncDgramIcmpV4Socket::new(self.core.into_parts(), self.identifier)
     }
 
     /// Convert this socket to the backwards-compatible `smol` async API.
@@ -537,7 +553,10 @@ pub struct IcmpSocket6 {
     bound_to: Option<Ipv6Addr>,
     inner: Socket,
     buf: Vec<u8>,
+    send_buf: Vec<u8>,
     opts: Opts,
+    /// The hop limit in `opts.hops` has not been applied to `inner` yet.
+    hops_pending: bool,
 }
 
 impl IcmpSocket6 {
@@ -587,22 +606,28 @@ impl IcmpSocket6 {
             bound_to: self.bound_to,
             inner: self.inner.try_clone()?,
             buf: vec![0; self.buf.capacity()],
+            send_buf: Vec::with_capacity(self.send_buf.capacity()),
             opts: Opts {
                 hops: self.opts.hops,
                 timeout: self.opts.timeout,
             },
+            hops_pending: self.hops_pending,
         })
     }
 
     fn new_from_socket(socket: Socket) -> std::io::Result<Self> {
+        let hops = 50;
+        socket.set_unicast_hops_v6(hops)?;
         Ok(Self {
             bound_to: None,
             inner: socket,
             buf: vec![0; DEFAULT_RECV_BUFFER_SIZE],
+            send_buf: Vec::with_capacity(DEFAULT_SEND_BUFFER_SIZE),
             opts: Opts {
-                hops: 50,
+                hops,
                 timeout: None,
             },
+            hops_pending: false,
         })
     }
 
@@ -648,6 +673,7 @@ impl IcmpSocket for IcmpSocket6 {
 
     fn set_max_hops(&mut self, hops: u32) {
         self.opts.hops = hops;
+        self.hops_pending = self.inner.set_unicast_hops_v6(hops).is_err();
     }
 
     fn bind<A: Into<Self::AddrType>>(&mut self, addr: A) -> std::io::Result<()> {
@@ -674,9 +700,13 @@ impl IcmpSocket for IcmpSocket6 {
         };
         packet = packet.with_checksum(source, &dest);
         let dest = ip_to_socket(&IpAddr::V6(dest));
-        self.inner.set_unicast_hops_v6(self.opts.hops)?;
-        let pkt = packet.get_bytes(true);
-        self.inner.send_to(&pkt, &(dest.into()))?;
+        if self.hops_pending {
+            self.inner.set_unicast_hops_v6(self.opts.hops)?;
+            self.hops_pending = false;
+        }
+        self.send_buf.clear();
+        packet.write_bytes(true, &mut self.send_buf);
+        self.inner.send_to(&self.send_buf, &(dest.into()))?;
         Ok(())
     }
 
